@@ -180,16 +180,60 @@ def fetch_audio_features(
     return out
 
 
+class LastfmError(Exception):
+    pass
+
+
+def _lastfm(session: requests.Session, params: dict[str, Any]) -> dict[str, Any] | None:
+    """One Last.fm call. Raises LastfmError for a bad key or a blocked account, returns None for
+    "artist not found" and similar per-artist misses."""
+    for attempt in range(4):
+        try:
+            resp = session.get(LASTFM_URL, params={**params, "format": "json"}, timeout=20)
+        except requests.RequestException as exc:
+            if attempt == 3:
+                raise LastfmError(f"couldn't connect ({type(exc).__name__})") from exc
+            time.sleep(1 + attempt)
+            continue
+        try:
+            data = resp.json()
+        except ValueError:
+            data = {}
+        code = data.get("error") if isinstance(data, dict) else None
+        if code in (10, 26):  # invalid / suspended key
+            raise LastfmError(data.get("message") or "invalid API key")
+        if code == 29 or resp.status_code == 429:  # rate limited
+            time.sleep(2 + attempt)
+            continue
+        if resp.status_code >= 500 or code in (8, 11, 16):  # temporary trouble on their side
+            time.sleep(1 + attempt)
+            continue
+        return None if code else data
+    return None
+
+
+def check_lastfm_key(api_key: str, session: requests.Session | None = None) -> tuple[bool, str]:
+    """Quick test used by the Settings window."""
+    session = session or requests.Session()
+    try:
+        data = _lastfm(session, {"method": "artist.gettoptags", "artist": "Radiohead", "api_key": api_key.strip()})
+    except LastfmError as exc:
+        return False, f"Last.fm said: {exc}"
+    tags = ((data or {}).get("toptags") or {}).get("tag") or []
+    if not tags:
+        return False, "Last.fm answered but returned no tags. Try again in a minute."
+    return True, "Key works. Last.fm will fill in missing genres on your next sync."
+
+
 def fetch_lastfm_tags(
     session: requests.Session, api_key: str, artist_names: list[str], progress: Progress = _noop
 ) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
     for i, name in enumerate(artist_names, start=1):
-        data = _get(session, LASTFM_URL, {
-            "method": "artist.gettoptags", "artist": name, "api_key": api_key,
-            "format": "json", "autocorrect": 1,
+        data = _lastfm(session, {
+            "method": "artist.gettoptags", "artist": name, "api_key": api_key, "autocorrect": 1,
         })
-        if data is not None and "error" not in data:
+        if data is not None:
             tags = (data.get("toptags") or {}).get("tag") or []
             if isinstance(tags, dict):
                 tags = [tags]
@@ -259,6 +303,8 @@ def enrich(
         if need:
             try:
                 _store(cache, "lastfm_tags", fetch_lastfm_tags(session, lastfm_key, need, progress), now)
+            except LastfmError as exc:
+                problems.append(f"Last.fm genre lookup failed: {exc}. Check the key in Settings.")
             except Exception as exc:
                 problems.append(f"Couldn't reach Last.fm for genres ({_describe(exc)}).")
             save_cache(cache, cache_path)
@@ -276,6 +322,7 @@ def enrich(
         t["features"] = cache["features"].get(tid)
     library["enriched_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     library["enrich_problems"] = problems
+    library["lastfm_used"] = bool(lastfm_key)
     return library
 
 
