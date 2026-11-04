@@ -85,3 +85,48 @@ def test_failed_reccobeats_batch_is_retried_next_time(tmp_path, monkeypatch):
     enrich.enrich(lib, FakeSpotify(), tmp_path / "c.json", session=Down())
     assert all(t["features"] is None for t in lib["tracks"].values())
     assert enrich.load_cache(tmp_path / "c.json")["features"] == {}
+
+
+def test_genres_fall_back_to_single_artist_lookups(tmp_path):
+    from spotipy.exceptions import SpotifyException
+
+    class NoBulk(FakeSpotify):
+        def artists(self, ids):
+            raise SpotifyException(403, -1, "Forbidden")
+
+        def artist(self, aid):
+            return {"id": aid, "genres": ["outlaw country"]}
+
+    lib = make_library()
+    enrich.enrich(lib, NoBulk(), tmp_path / "c.json", session=FakeSession())
+    assert lib["artists"]["A"]["genres"] == ["outlaw country"]
+    assert lib["enrich_problems"] == []
+
+
+def test_refused_genres_are_reported(tmp_path):
+    from spotipy.exceptions import SpotifyException
+
+    class Refused(FakeSpotify):
+        def artists(self, ids):
+            raise SpotifyException(403, -1, "Forbidden")
+
+        def artist(self, aid):
+            raise SpotifyException(403, -1, "Forbidden")
+
+    lib = make_library()
+    enrich.enrich(lib, Refused(), tmp_path / "c.json", session=FakeSession())
+    assert "HTTP 403" in lib["enrich_problems"][0]
+    assert round(lib["tracks"][sid("a")]["features"]["tempo"]) == 120  # BPM still filled in
+
+
+def test_empty_results_are_retried_later(tmp_path, monkeypatch):
+    cache, session = tmp_path / "c.json", FakeSession()
+    enrich.enrich(make_library(), FakeSpotify(), cache, session=session)
+    asked = lambda: sum(sid("U") in p.get("ids", "") for _, p in session.calls)
+    assert asked() == 1
+    enrich.enrich(make_library(), FakeSpotify(), cache, session=session)
+    assert asked() == 1  # too soon to ask again
+    real = enrich.time.time
+    monkeypatch.setattr(enrich.time, "time", lambda: real() + enrich.RETRY_EMPTY_AFTER + 60)
+    enrich.enrich(make_library(), FakeSpotify(), cache, session=session)
+    assert asked() == 2

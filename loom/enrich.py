@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import requests
+from spotipy.exceptions import SpotifyException
 
 RECCOBEATS_URL = "https://api.reccobeats.com/v1/audio-features"
 LASTFM_URL = "https://ws.audioscrobbler.com/2.0/"
@@ -25,6 +26,7 @@ FEATURE_KEYS = (
     "instrumentalness", "speechiness", "liveness", "loudness", "key", "mode",
 )
 RECCO_BATCH = 40
+RETRY_EMPTY_AFTER = 3 * 24 * 3600  # look again for songs/artists that had no data after 3 days
 KEY_NAMES = ["C", "C♯", "D", "E♭", "E", "F", "F♯", "G", "A♭", "A", "B♭", "B"]
 
 # Last.fm tags that describe the listener rather than the music.
@@ -60,7 +62,27 @@ def load_cache(path: Path) -> dict[str, Any]:
     data.setdefault("features", {})   # track id -> features dict, or None when not found
     data.setdefault("spotify_genres", {})  # artist id -> list
     data.setdefault("lastfm_tags", {})  # artist name (lowercase) -> list
+    data.setdefault("empty_since", {})  # "kind:id" -> when a lookup found nothing
     return data
+
+
+def _needs_lookup(cache: dict[str, Any], kind: str, key: str, now: float) -> bool:
+    """True when we have never looked, or last time found nothing and that was a while ago."""
+    if key not in cache[kind]:
+        return True
+    if cache[kind][key]:
+        return False
+    since = cache["empty_since"].get(f"{kind}:{key}")
+    return since is None or now - since > RETRY_EMPTY_AFTER
+
+
+def _store(cache: dict[str, Any], kind: str, results: dict[str, Any], now: float) -> None:
+    for key, value in results.items():
+        cache[kind][key] = value
+        if value:
+            cache["empty_since"].pop(f"{kind}:{key}", None)
+        else:
+            cache["empty_since"][f"{kind}:{key}"] = now
 
 
 def save_cache(cache: dict[str, Any], path: Path) -> None:
@@ -73,10 +95,27 @@ def save_cache(cache: dict[str, Any], path: Path) -> None:
 
 
 def fetch_spotify_genres(sp, artist_ids: list[str], progress: Progress = _noop) -> dict[str, list[str]]:
+    """Artist genres from Spotify. Uses the 50-at-a-time endpoint, and falls back to one artist
+    per request if Spotify refuses the bulk one (it does for some apps). Raises if both fail."""
     out: dict[str, list[str]] = {}
+    bulk_ok = True
     for start in range(0, len(artist_ids), 50):
         batch = artist_ids[start:start + 50]
-        for artist in (sp.artists(batch) or {}).get("artists", []):
+        artists = None
+        if bulk_ok:
+            try:
+                artists = (sp.artists(batch) or {}).get("artists", [])
+            except SpotifyException:
+                bulk_ok = False
+        if artists is None:
+            artists = []
+            for aid in batch:
+                try:
+                    artists.append(sp.artist(aid))
+                except SpotifyException:
+                    if not out and not artists:
+                        raise  # the single-artist endpoint is refused too
+        for artist in artists:
             if artist and artist.get("id"):
                 out[artist["id"]] = list(artist.get("genres") or [])
         progress("Reading artist genres", min(start + 50, len(artist_ids)), len(artist_ids))
@@ -186,6 +225,8 @@ def enrich(
     session.headers.setdefault("User-Agent", "Loom/0.2 (personal playlist tool)")
     cache = load_cache(cache_path)
     tracks = library["tracks"]
+    now = time.time()
+    problems: list[str] = []
 
     artists: dict[str, str] = {}
     for t in tracks.values():
@@ -193,26 +234,33 @@ def enrich(
             if a.get("id"):
                 artists[a["id"]] = a["name"]
 
-    missing_artists = [a for a in artists if a not in cache["spotify_genres"]]
+    missing_artists = [a for a in artists if _needs_lookup(cache, "spotify_genres", a, now)]
     if missing_artists:
         try:
-            cache["spotify_genres"].update(fetch_spotify_genres(sp, missing_artists, progress))
-        except Exception:
-            pass  # genres are best effort; keep going with BPM
+            _store(cache, "spotify_genres", fetch_spotify_genres(sp, missing_artists, progress), now)
+        except Exception as exc:  # genres are best effort; keep going with BPM
+            problems.append(f"Spotify refused the artist genre lookup ({_describe(exc)}).")
         save_cache(cache, cache_path)
 
-    missing_tracks = [tid for tid in tracks if tid not in cache["features"]]
+    missing_tracks = [tid for tid in tracks if _needs_lookup(cache, "features", tid, now)]
     if missing_tracks:
-        cache["features"].update(fetch_audio_features(session, missing_tracks, progress))
+        try:
+            _store(cache, "features", fetch_audio_features(session, missing_tracks, progress), now)
+        except Exception as exc:
+            problems.append(f"Couldn't reach ReccoBeats for BPM data ({_describe(exc)}).")
         save_cache(cache, cache_path)
 
     if lastfm_key:
         need = sorted({
             name for aid, name in artists.items()
-            if not cache["spotify_genres"].get(aid) and name.lower() not in cache["lastfm_tags"]
+            if not cache["spotify_genres"].get(aid)
+            and _needs_lookup(cache, "lastfm_tags", name.lower(), now)
         })
         if need:
-            cache["lastfm_tags"].update(fetch_lastfm_tags(session, lastfm_key, need, progress))
+            try:
+                _store(cache, "lastfm_tags", fetch_lastfm_tags(session, lastfm_key, need, progress), now)
+            except Exception as exc:
+                problems.append(f"Couldn't reach Last.fm for genres ({_describe(exc)}).")
             save_cache(cache, cache_path)
 
     library["artists"] = {}
@@ -227,7 +275,14 @@ def enrich(
     for tid, t in tracks.items():
         t["features"] = cache["features"].get(tid)
     library["enriched_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    library["enrich_problems"] = problems
     return library
+
+
+def _describe(exc: Exception) -> str:
+    if isinstance(exc, SpotifyException):
+        return f"HTTP {exc.http_status}: {exc.msg}".strip()
+    return f"{type(exc).__name__}: {exc}"
 
 
 def track_genres(library: dict[str, Any], track: dict[str, Any]) -> list[str]:

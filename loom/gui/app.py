@@ -253,12 +253,18 @@ class OverviewPage(QWidget):
                 card.value.setText(f"{v:,}")
         self._fill_ranked(self.top_list, s["top_artists"], "No artists yet.")
         self._fill_ranked(self.genre_list, s["top_genres"], "No genres yet. Sync again to add them.")
+        notes = list(data.get("enrich_problems") or [])
         skipped = data.get("skipped_playlists") or []
-        self.note.setText(
-            f"Spotify didn't let Loom read {len(skipped)} playlist(s): {', '.join(skipped)}."
-            if skipped
-            else ""
-        )
+        if skipped:
+            notes.append(f"Spotify didn't let Loom read {len(skipped)} playlist(s): {', '.join(skipped)}.")
+        if data.get("enriched_at"):
+            notes.append(f"BPM found for {s['bpm_coverage']:.0%} of songs. Songs without it are checked again "
+                         "on later syncs.")
+            if any(not a.get("genres") for a in data.get("artists", {}).values()):
+                no_genre = sum(1 for a in data["artists"].values() if not a.get("genres"))
+                tip = "" if config.load_lastfm_key() else " Add a free Last.fm key in Spotify app settings to fill these in."
+                notes.append(f"{no_genre} of {len(data['artists'])} artists have no genre.{tip}")
+        self.note.setText("\n".join(notes))
 
 
 class TrackPage(QWidget):
