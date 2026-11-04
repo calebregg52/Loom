@@ -81,7 +81,7 @@ class SyncWorker(QObject):
 class SetupDialog(QDialog):
     def __init__(self, parent=None, client_id: str = "", lastfm_key: str = ""):
         super().__init__(parent)
-        self.setWindowTitle("Connect Spotify")
+        self.setWindowTitle("Loom settings")
         self.setMinimumWidth(520)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(28, 28, 28, 24)
@@ -128,7 +128,7 @@ class SetupDialog(QDialog):
         buttons.addStretch(1)
         cancel = QPushButton("Cancel")
         cancel.clicked.connect(self.reject)
-        self.ok = QPushButton("Connect")
+        self.ok = QPushButton("Save")
         self.ok.setObjectName("primary")
         self.ok.clicked.connect(self.accept)
         self.ok.setEnabled(bool(client_id.strip()))
@@ -262,7 +262,7 @@ class OverviewPage(QWidget):
                          "on later syncs.")
             if any(not a.get("genres") for a in data.get("artists", {}).values()):
                 no_genre = sum(1 for a in data["artists"].values() if not a.get("genres"))
-                tip = "" if config.load_lastfm_key() else " Add a free Last.fm key in Spotify app settings to fill these in."
+                tip = "" if config.load_lastfm_key() else " Add a free Last.fm key in Settings to fill these in."
                 notes.append(f"{no_genre} of {len(data['artists'])} artists have no genre.{tip}")
         self.note.setText("\n".join(notes))
 
@@ -411,7 +411,7 @@ class MainWindow(QMainWindow):
         self.sync_btn = QPushButton("Sync library")
         self.sync_btn.setObjectName("primary")
         self.sync_btn.clicked.connect(self.sync)
-        account = QPushButton("Spotify app settings")
+        account = QPushButton("Settings")
         account.clicked.connect(self.edit_settings)
         lay.addWidget(self.status)
         lay.addWidget(self.bar)
