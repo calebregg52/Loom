@@ -3,8 +3,12 @@ from __future__ import annotations
 from typing import Any
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSortFilterProxyModel, Qt
+from PySide6.QtGui import QColor
 
-COLUMNS = ["#", "TITLE", "ARTIST", "ALBUM", "YEAR", "LENGTH", "ADDED"]
+from ..enrich import key_label, track_genres
+from .theme import MUTED
+
+COLUMNS = ["#", "TITLE", "ARTIST", "GENRE", "BPM", "ENERGY", "KEY", "YEAR", "LENGTH", "ADDED"]
 SORT_ROLE = Qt.UserRole + 1
 
 
@@ -16,12 +20,14 @@ def fmt_duration(ms: int) -> str:
 class TrackTableModel(QAbstractTableModel):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._rows: list[tuple[int, dict[str, Any], str]] = []
+        self._rows: list[tuple[int, dict[str, Any], str, str]] = []
 
-    def set_rows(self, entries: list[dict[str, Any]], tracks: dict[str, dict[str, Any]]) -> None:
+    def set_rows(self, entries: list[dict[str, Any]], library: dict[str, Any]) -> None:
+        tracks = library["tracks"]
         self.beginResetModel()
         self._rows = [
-            (i, tracks[e["id"]], (e.get("added_at") or "")[:10])
+            (i, tracks[e["id"]], (e.get("added_at") or "")[:10],
+             ", ".join(track_genres(library, tracks[e["id"]])))
             for i, e in enumerate(entries, start=1)
             if e["id"] in tracks
         ]
@@ -41,32 +47,38 @@ class TrackTableModel(QAbstractTableModel):
     def data(self, index, role=Qt.DisplayRole):
         if not index.isValid():
             return None
-        n, t, added = self._rows[index.row()]
+        n, t, added, genre = self._rows[index.row()]
+        f = t.get("features") or {}
         col = index.column()
         if role == Qt.DisplayRole:
             return [
                 str(n),
                 t["name"],
                 ", ".join(a["name"] for a in t["artists"]),
-                t["album"]["name"],
+                genre.split(", ")[0],
+                f"{f['tempo']:.0f}" if f.get("tempo") else "",
+                f"{f['energy'] * 100:.0f}" if f.get("energy") is not None else "",
+                key_label(f),
                 t["album"]["release_date"][:4],
                 fmt_duration(t["duration_ms"]),
                 added,
             ][col]
         if role == SORT_ROLE:
-            if col == 0:
-                return n
-            if col == 5:
-                return t["duration_ms"]
+            numeric = {0: n, 4: f.get("tempo"), 5: f.get("energy"), 8: t["duration_ms"]}
+            if col in numeric:
+                return numeric[col] if numeric[col] is not None else -1
             return (self.data(index, Qt.DisplayRole) or "").lower()
-        if role == Qt.ForegroundRole and col in (0, 4, 5, 6):
-            from PySide6.QtGui import QColor
-
-            from .theme import MUTED
-
+        if role == Qt.ToolTipRole and col == 1:
+            return f"{t['name']} · {t['album']['name']}"
+        if role == Qt.ToolTipRole and col == 3 and genre:
+            return genre
+        if role == Qt.ToolTipRole and col == 5 and f:
+            return (f"Energy {f.get('energy', 0):.2f} · Danceability {f.get('danceability', 0):.2f} · "
+                    f"Mood (valence) {f.get('valence', 0):.2f} · Acoustic {f.get('acousticness', 0):.2f}")
+        if role == Qt.ForegroundRole and col in (0, 3, 6, 7, 8, 9):
             return QColor(MUTED)
-        if role == Qt.TextAlignmentRole and col in (0, 4, 5):
-            return int(Qt.AlignRight | Qt.AlignVCenter) if col != 4 else int(Qt.AlignCenter)
+        if role == Qt.TextAlignmentRole and col in (0, 4, 5, 7, 8):
+            return int(Qt.AlignRight | Qt.AlignVCenter)
         return None
 
 
@@ -85,5 +97,5 @@ class TrackFilter(QSortFilterProxyModel):
             return True
         model = self.sourceModel()
         return any(
-            self._needle in (model.index(row, c, parent).data() or "").lower() for c in (1, 2, 3)
+            self._needle in (model.index(row, c, parent).data() or "").lower() for c in (1, 2, 3)  # title, artist, genre
         )

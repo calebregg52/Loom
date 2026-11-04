@@ -66,6 +66,10 @@ class SyncWorker(QObject):
             sp.current_user()  # triggers the browser login the first time
             data = library.fetch_library(sp, self.progress.emit)
             library.save(data, config.library_path())
+            from .. import enrich
+
+            enrich.enrich(data, sp, config.enrich_cache_path(), config.load_lastfm_key(), self.progress.emit)
+            library.save(data, config.library_path())
             self.finished.emit(data)
         except Exception as exc:  # shown to the user, never crash the window
             self.failed.emit(f"{type(exc).__name__}: {exc}")
@@ -75,7 +79,7 @@ class SyncWorker(QObject):
 
 
 class SetupDialog(QDialog):
-    def __init__(self, parent=None, client_id: str = ""):
+    def __init__(self, parent=None, client_id: str = "", lastfm_key: str = ""):
         super().__init__(parent)
         self.setWindowTitle("Connect Spotify")
         self.setMinimumWidth(520)
@@ -107,6 +111,19 @@ class SetupDialog(QDialog):
         self.client_id.setPlaceholderText("Client ID")
         lay.addWidget(self.client_id)
 
+        lay.addSpacing(6)
+        extra = label(
+            "<b>Optional:</b> a free <a style='color:#9286ff' href='https://www.last.fm/api/account/create'>"
+            "Last.fm API key</a> fills in genres for artists Spotify has none for.",
+            "muted", wrap=True,
+        )
+        extra.setOpenExternalLinks(True)
+        extra.setTextFormat(Qt.RichText)
+        lay.addWidget(extra)
+        self.lastfm = QLineEdit(lastfm_key)
+        self.lastfm.setPlaceholderText("Last.fm API key (optional)")
+        lay.addWidget(self.lastfm)
+
         buttons = QHBoxLayout()
         buttons.addStretch(1)
         cancel = QPushButton("Cancel")
@@ -122,6 +139,9 @@ class SetupDialog(QDialog):
 
     def value(self) -> str:
         return self.client_id.text().strip()
+
+    def lastfm_value(self) -> str:
+        return self.lastfm.text().strip()
 
 
 # ---------------------------------------------------------------- pages
@@ -158,6 +178,8 @@ class OverviewPage(QWidget):
                 ("playlists", "playlists"),
                 ("liked", "liked songs"),
                 ("artists", "artists"),
+                ("genres", "genres"),
+                ("avg_bpm", "average BPM"),
                 ("hours", "hours of music"),
             ]
         }
@@ -165,20 +187,53 @@ class OverviewPage(QWidget):
             grid.addWidget(card, 0, i)
         lay.addLayout(grid)
 
-        self.top_card = QFrame()
-        self.top_card.setObjectName("card")
-        top = QVBoxLayout(self.top_card)
-        top.setContentsMargins(20, 18, 20, 18)
-        top.addWidget(label("MOST COLLECTED ARTISTS", "sectionLabel"))
-        self.top_list = QGridLayout()
-        self.top_list.setHorizontalSpacing(24)
-        self.top_list.setVerticalSpacing(8)
-        top.addLayout(self.top_list)
-        lay.addWidget(self.top_card)
+        tops = QHBoxLayout()
+        tops.setSpacing(14)
+        self.top_card, self.top_list = self._ranked_card("MOST COLLECTED ARTISTS")
+        self.genre_card, self.genre_list = self._ranked_card("TOP GENRES")
+        tops.addWidget(self.top_card, 1)
+        tops.addWidget(self.genre_card, 1)
+        lay.addLayout(tops)
 
         self.note = label("", "muted", wrap=True)
         lay.addWidget(self.note)
         lay.addStretch(1)
+
+    @staticmethod
+    def _ranked_card(title: str):
+        card = QFrame()
+        card.setObjectName("card")
+        box = QVBoxLayout(card)
+        box.setContentsMargins(20, 18, 20, 18)
+        box.addWidget(label(title, "sectionLabel"))
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(8)
+        grid.setColumnStretch(1, 1)
+        box.addLayout(grid)
+        box.addStretch(1)
+        return card, grid
+
+    @staticmethod
+    def _fill_ranked(grid: QGridLayout, rows, empty: str) -> None:
+        while grid.count():
+            grid.takeAt(0).widget().deleteLater()
+        if not rows:
+            grid.addWidget(label(empty, "muted", wrap=True), 0, 0, 1, 3)
+            return
+        biggest = rows[0][1]
+        for r, (name, count) in enumerate(rows):
+            num = label(f"{r + 1}", "muted")
+            num.setFixedWidth(22)
+            grid.addWidget(num, r, 0)
+            grid.addWidget(label(name), r, 1)
+            bar = QProgressBar()
+            bar.setTextVisible(False)
+            bar.setRange(0, biggest)
+            bar.setValue(count)
+            bar.setFixedWidth(110)
+            bar.setToolTip(f"{count} songs")
+            grid.addWidget(bar, r, 2)
 
     def show_library(self, data: dict[str, Any]) -> None:
         s = library.summary(data)
@@ -187,25 +242,17 @@ class OverviewPage(QWidget):
         self.subtitle.setText(f"Last synced {when}")
         for key, card in self.cards.items():
             v = s[key]
-            card.value.setText(f"{v:,.1f}" if key == "hours" else f"{v:,}")
-        while self.top_list.count():
-            self.top_list.takeAt(0).widget().deleteLater()
-        biggest = s["top_artists"][0][1] if s["top_artists"] else 1
-        for i, (name, count) in enumerate(s["top_artists"]):
-            col = (i // 5) * 3
-            r = i % 5
-            num = label(f"{i + 1}", "muted")
-            num.setFixedWidth(22)
-            self.top_list.addWidget(num, r, col)
-            self.top_list.setColumnStretch(col + 1, 1)
-            self.top_list.addWidget(label(name), r, col + 1)
-            bar = QProgressBar()
-            bar.setTextVisible(False)
-            bar.setRange(0, biggest)
-            bar.setValue(count)
-            bar.setFixedWidth(120)
-            bar.setToolTip(f"{count} songs")
-            self.top_list.addWidget(bar, r, col + 2)
+            if v is None:
+                card.value.setText("–")
+            elif key == "hours":
+                card.value.setText(f"{v:,.1f}")
+            elif key == "avg_bpm":
+                card.value.setText(f"{v:.0f}")
+                card.setToolTip(f"BPM found for {s['bpm_coverage']:.0%} of your songs")
+            else:
+                card.value.setText(f"{v:,}")
+        self._fill_ranked(self.top_list, s["top_artists"], "No artists yet.")
+        self._fill_ranked(self.genre_list, s["top_genres"], "No genres yet. Sync again to add them.")
         skipped = data.get("skipped_playlists") or []
         self.note.setText(
             f"Spotify didn't let Loom read {len(skipped)} playlist(s): {', '.join(skipped)}."
@@ -228,7 +275,7 @@ class TrackPage(QWidget):
         titles.addWidget(self.subtitle)
         head.addLayout(titles, 1)
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Search title, artist or album")
+        self.search.setPlaceholderText("Search title, artist or genre")
         self.search.setFixedWidth(280)
         self.search.setClearButtonEnabled(True)
         head.addWidget(self.search, 0, Qt.AlignBottom)
@@ -255,17 +302,17 @@ class TrackPage(QWidget):
         h.setHighlightSections(False)
         h.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         for col, mode in enumerate(
-            [QHeaderView.ResizeToContents, QHeaderView.Stretch, QHeaderView.Stretch, QHeaderView.Stretch,
-             QHeaderView.ResizeToContents, QHeaderView.ResizeToContents, QHeaderView.ResizeToContents]
+            [QHeaderView.ResizeToContents, QHeaderView.Stretch, QHeaderView.Stretch, QHeaderView.Stretch]
+            + [QHeaderView.ResizeToContents] * 6
         ):
             h.setSectionResizeMode(col, mode)
         lay.addWidget(self.table, 1)
 
-    def show_tracks(self, title: str, subtitle: str, entries, tracks) -> None:
+    def show_tracks(self, title: str, subtitle: str, entries, data) -> None:
         self.title.setText(title)
         self.subtitle.setText(subtitle)
         self.search.clear()
-        self.model.set_rows(entries, tracks)
+        self.model.set_rows(entries, data)
         self.table.sortByColumn(0, Qt.AscendingOrder)
         self.table.scrollToTop()
 
@@ -414,7 +461,7 @@ class MainWindow(QMainWindow):
         self.nav_liked.setChecked(True)
         self.playlist_list.setCurrentRow(-1)
         liked = self.data["liked"]
-        self.tracks.show_tracks("Liked Songs", self._subtitle(liked), liked, self.data["tracks"])
+        self.tracks.show_tracks("Liked Songs", self._subtitle(liked), liked, self.data)
         self.stack.setCurrentWidget(self.tracks)
 
     def show_playlist(self, row: int) -> None:
@@ -427,7 +474,7 @@ class MainWindow(QMainWindow):
         p = self.data["playlists"][row]
         sub = self._subtitle(p["tracks"])
         sub = f"By {p['owner']} · {sub}" if p["owner"] else sub
-        self.tracks.show_tracks(p["name"], sub, p["tracks"], self.data["tracks"])
+        self.tracks.show_tracks(p["name"], sub, p["tracks"], self.data)
         self.stack.setCurrentWidget(self.tracks)
 
     def _subtitle(self, entries) -> str:
@@ -440,12 +487,13 @@ class MainWindow(QMainWindow):
     # ---- sync
 
     def edit_settings(self) -> bool:
-        dlg = SetupDialog(self, config.load_client_id() or "")
+        dlg = SetupDialog(self, config.load_client_id() or "", config.load_lastfm_key() or "")
         if dlg.exec() != QDialog.Accepted:
             return False
         if dlg.value() != (config.load_client_id() or ""):
             config.forget_login()
         config.save_client_id(dlg.value())
+        config.save_lastfm_key(dlg.lastfm_value())
         return True
 
     def sync(self) -> None:

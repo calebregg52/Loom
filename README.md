@@ -26,3 +26,15 @@ python main.py
 
 Build the EXE yourself with `pip install pyinstaller` then `pyinstaller loom.spec` (output in `dist/`).
 Run tests with `python -m pytest`.
+
+## Song data
+
+Each sync also adds genres and audio features to your songs:
+
+- **Genres** come from Spotify's artist data. Spotify has been thinning this out, so if you add a free
+  [Last.fm API key](https://www.last.fm/api/account/create) in **Spotify app settings**, Loom fills in
+  missing genres from Last.fm tags.
+- **BPM, energy, mood, danceability and key** come from [ReccoBeats](https://reccobeats.com), a free API
+  that looks songs up by Spotify ID (Spotify no longer gives this data to new apps). Songs it doesn't know show blank.
+
+Results are cached in `%APPDATA%\Loom\song_data_cache.json`, so later syncs only look up new songs.

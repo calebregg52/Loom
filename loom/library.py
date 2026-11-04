@@ -146,7 +146,20 @@ def summary(library: dict[str, Any]) -> dict[str, Any]:
         for a in t["artists"]:
             artist_counts[a["name"]] = artist_counts.get(a["name"], 0) + 1
     top = sorted(artist_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+    artist_info = library.get("artists", {})
+    genre_counts: dict[str, int] = {}
+    for t in tracks.values():
+        genres = set()
+        for a in t["artists"]:
+            genres.update((artist_info.get(a.get("id")) or {}).get("genres", []))
+        for g in genres:
+            genre_counts[g] = genre_counts.get(g, 0) + 1
+    tempos = [t["features"]["tempo"] for t in tracks.values() if (t.get("features") or {}).get("tempo")]
     return {
+        "top_genres": sorted(genre_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:10],
+        "genres": len(genre_counts),
+        "avg_bpm": sum(tempos) / len(tempos) if tempos else None,
+        "bpm_coverage": len(tempos) / len(tracks) if tracks else 0.0,
         "playlists": len(library.get("playlists", [])),
         "liked": len(library.get("liked", [])),
         "tracks": len(tracks),
