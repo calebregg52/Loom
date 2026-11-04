@@ -19,6 +19,8 @@ from typing import Any, Callable
 import requests
 from spotipy.exceptions import SpotifyException
 
+from .spotify import Cancelled
+
 RECCOBEATS_URL = "https://api.reccobeats.com/v1/audio-features"
 LASTFM_URL = "https://ws.audioscrobbler.com/2.0/"
 FEATURE_KEYS = (
@@ -94,31 +96,55 @@ def save_cache(cache: dict[str, Any], path: Path) -> None:
 # ---------------------------------------------------------------- sources
 
 
-def fetch_spotify_genres(sp, artist_ids: list[str], progress: Progress = _noop) -> dict[str, list[str]]:
-    """Artist genres from Spotify. Uses the 50-at-a-time endpoint, and falls back to one artist
-    per request if Spotify refuses the bulk one (it does for some apps). Raises if both fail."""
-    out: dict[str, list[str]] = {}
+class NoSpotifyGenres(Exception):
+    """Spotify answered but gave no genres at all, so asking about more artists is pointless."""
+
+
+GENRE_PROBE = 30  # if this many artists in a row come back with no genres, stop asking Spotify
+
+
+def fetch_spotify_genres(
+    sp, artist_ids: list[str], progress: Progress = _noop, out: dict[str, list[str]] | None = None
+) -> dict[str, list[str]]:
+    """Artist genres from Spotify, written into `out` as they arrive (so a later failure keeps
+    what was found). Uses the 50-at-a-time endpoint, falling back to one artist per request if
+    Spotify refuses the bulk one. Raises NoSpotifyGenres when Spotify returns none at all."""
+    out = {} if out is None else out
+    total = len(artist_ids)
+    done = 0
     bulk_ok = True
-    for start in range(0, len(artist_ids), 50):
+    found_any = False
+
+    def take(artist):
+        nonlocal found_any, done
+        if artist and artist.get("id"):
+            genres = list(artist.get("genres") or [])
+            out[artist["id"]] = genres
+            found_any = found_any or bool(genres)
+        done += 1
+        if not found_any and done >= GENRE_PROBE:
+            raise NoSpotifyGenres()
+
+    for start in range(0, total, 50):
         batch = artist_ids[start:start + 50]
-        artists = None
         if bulk_ok:
             try:
-                artists = (sp.artists(batch) or {}).get("artists", [])
-            except SpotifyException:
+                for artist in (sp.artists(batch) or {}).get("artists", []):
+                    take(artist)
+                progress("Reading artist genres from Spotify", done, total)
+                continue
+            except SpotifyException as exc:
+                if exc.http_status == 429:
+                    raise
                 bulk_ok = False
-        if artists is None:
-            artists = []
-            for aid in batch:
-                try:
-                    artists.append(sp.artist(aid))
-                except SpotifyException:
-                    if not out and not artists:
-                        raise  # the single-artist endpoint is refused too
-        for artist in artists:
-            if artist and artist.get("id"):
-                out[artist["id"]] = list(artist.get("genres") or [])
-        progress("Reading artist genres", min(start + 50, len(artist_ids)), len(artist_ids))
+        for aid in batch:
+            try:
+                take(sp.artist(aid))
+            except SpotifyException as exc:
+                if exc.http_status == 429 or not found_any and done == 0:
+                    raise  # rate limited, or the single-artist endpoint is refused too
+                done += 1
+            progress("Reading artist genres from Spotify", done, total)
     return out
 
 
@@ -157,10 +183,11 @@ def _spotify_id(item: dict[str, Any]) -> str | None:
 
 
 def fetch_audio_features(
-    session: requests.Session, track_ids: list[str], progress: Progress = _noop
+    session: requests.Session, track_ids: list[str], progress: Progress = _noop,
+    out: dict[str, dict[str, Any] | None] | None = None,
 ) -> dict[str, dict[str, Any] | None]:
     """Look up audio features on ReccoBeats. Songs it doesn't know map to None."""
-    out: dict[str, dict[str, Any] | None] = {}
+    out = {} if out is None else out
     for start in range(0, len(track_ids), RECCO_BATCH):
         batch = track_ids[start:start + RECCO_BATCH]
         data = _get(session, RECCOBEATS_URL, {"ids": ",".join(batch)})
@@ -226,9 +253,10 @@ def check_lastfm_key(api_key: str, session: requests.Session | None = None) -> t
 
 
 def fetch_lastfm_tags(
-    session: requests.Session, api_key: str, artist_names: list[str], progress: Progress = _noop
+    session: requests.Session, api_key: str, artist_names: list[str], progress: Progress = _noop,
+    out: dict[str, list[str]] | None = None,
 ) -> dict[str, list[str]]:
-    out: dict[str, list[str]] = {}
+    out = {} if out is None else out
     for i, name in enumerate(artist_names, start=1):
         data = _lastfm(session, {
             "method": "artist.gettoptags", "artist": name, "api_key": api_key, "autocorrect": 1,
@@ -271,6 +299,7 @@ def enrich(
     tracks = library["tracks"]
     now = time.time()
     problems: list[str] = []
+    lastfm_problem: str | None = None
 
     artists: dict[str, str] = {}
     for t in tracks.values():
@@ -280,18 +309,36 @@ def enrich(
 
     missing_artists = [a for a in artists if _needs_lookup(cache, "spotify_genres", a, now)]
     if missing_artists:
+        found: dict[str, list[str]] = {}
         try:
-            _store(cache, "spotify_genres", fetch_spotify_genres(sp, missing_artists, progress), now)
+            fetch_spotify_genres(sp, missing_artists, progress, found)
+        except NoSpotifyGenres:
+            # Spotify isn't giving this app genres. Mark everyone as checked so Last.fm takes over.
+            found.update({a: [] for a in missing_artists if a not in found})
+            problems.append("Spotify returned no genres for your artists, so Loom stopped asking it "
+                            "and relies on Last.fm.")
+        except Cancelled:
+            _store(cache, "spotify_genres", found, now)
+            save_cache(cache, cache_path)
+            raise
         except Exception as exc:  # genres are best effort; keep going with BPM
-            problems.append(f"Spotify refused the artist genre lookup ({_describe(exc)}).")
+            problems.append(f"Spotify genre lookup stopped early ({_describe(exc)}). "
+                            "The rest are picked up on your next sync.")
+        _store(cache, "spotify_genres", found, now)
         save_cache(cache, cache_path)
 
     missing_tracks = [tid for tid in tracks if _needs_lookup(cache, "features", tid, now)]
     if missing_tracks:
+        got: dict[str, Any] = {}
         try:
-            _store(cache, "features", fetch_audio_features(session, missing_tracks, progress), now)
+            fetch_audio_features(session, missing_tracks, progress, got)
+        except Cancelled:
+            _store(cache, "features", got, now)
+            save_cache(cache, cache_path)
+            raise
         except Exception as exc:
             problems.append(f"Couldn't reach ReccoBeats for BPM data ({_describe(exc)}).")
+        _store(cache, "features", got, now)
         save_cache(cache, cache_path)
 
     if lastfm_key:
@@ -301,12 +348,18 @@ def enrich(
             and _needs_lookup(cache, "lastfm_tags", name.lower(), now)
         })
         if need:
+            tags: dict[str, list[str]] = {}
             try:
-                _store(cache, "lastfm_tags", fetch_lastfm_tags(session, lastfm_key, need, progress), now)
+                fetch_lastfm_tags(session, lastfm_key, need, progress, tags)
+            except Cancelled:
+                _store(cache, "lastfm_tags", tags, now)
+                save_cache(cache, cache_path)
+                raise
             except LastfmError as exc:
-                problems.append(f"Last.fm genre lookup failed: {exc}. Check the key in Settings.")
+                lastfm_problem = f"{exc}. Check the key with Test key in Settings."
             except Exception as exc:
-                problems.append(f"Couldn't reach Last.fm for genres ({_describe(exc)}).")
+                lastfm_problem = f"couldn't reach Last.fm ({_describe(exc)})."
+            _store(cache, "lastfm_tags", tags, now)
             save_cache(cache, cache_path)
 
     library["artists"] = {}
@@ -323,6 +376,7 @@ def enrich(
     library["enriched_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     library["enrich_problems"] = problems
     library["lastfm_used"] = bool(lastfm_key)
+    library["lastfm_problem"] = lastfm_problem
     return library
 
 

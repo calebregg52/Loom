@@ -58,26 +58,47 @@ class SyncWorker(QObject):
     finished = Signal(dict)
     failed = Signal(str)
 
+    cancelled = Signal()
+
     def __init__(self, client_id: str):
         super().__init__()
         self.client_id = client_id
+        self.sp = None
+        self._stop = False
+
+    def cancel(self) -> None:
+        self._stop = True
+        if self.sp is not None:
+            self.sp.cancel_event.set()
+
+    def _progress(self, message: str, done: int, total: int) -> None:
+        from ..spotify import Cancelled
+
+        if self._stop:
+            raise Cancelled()
+        self.progress.emit(message, done, total)
 
     def run(self) -> None:
-        try:
-            from ..spotify import make_client
+        from ..spotify import Cancelled, make_client
 
-            sp = make_client(self.client_id)
+        try:
+            self.sp = sp = make_client(self.client_id)
+            if self._stop:
+                raise Cancelled()
             self.progress.emit("Waiting for Spotify sign-in in your browser…", 0, 0)
             sp.current_user()  # triggers the browser login the first time
-            data = library.fetch_library(sp, self.progress.emit)
+            data = library.fetch_library(sp, self._progress)
             library.save(data, config.library_path())
             from .. import enrich
 
-            enrich.enrich(data, sp, config.enrich_cache_path(), config.load_lastfm_key(), self.progress.emit)
+            self.progress.emit("Playlists done. Now adding genres and BPM…", 0, 0)
+            enrich.enrich(data, sp, config.enrich_cache_path(), config.load_lastfm_key(), self._progress)
             library.save(data, config.library_path())
             self.finished.emit(data)
+        except Cancelled:
+            self.cancelled.emit()
         except Exception as exc:  # shown to the user, never crash the window
-            self.failed.emit(f"{type(exc).__name__}: {exc}")
+            self.failed.emit(str(exc) if type(exc).__name__ == "RateLimited" else f"{type(exc).__name__}: {exc}")
 
 
 class PublishWorker(QObject):
@@ -323,7 +344,7 @@ class OverviewPage(QWidget):
         self._fill_ranked(self.top_list, s["top_artists"], "No artists yet.")
         self._fill_ranked(self.genre_list, s["top_genres"], "No genres yet. Sync again to add them.")
         self._show_sources(data)
-        notes = [p for p in (data.get("enrich_problems") or []) if "Last.fm" not in p]
+        notes = list(data.get("enrich_problems") or [])
         skipped = data.get("skipped_playlists") or []
         if skipped:
             notes.append(f"Spotify didn't let Loom read {len(skipped)} playlist(s): {', '.join(skipped)}.")
@@ -347,7 +368,7 @@ class OverviewPage(QWidget):
         )
         ok, bad = "<span style='color:#4ade80'>●</span>", "<span style='color:#f87171'>●</span>"
         idle = "<span style='color:#8b91a3'>●</span>"
-        problem = next((p for p in data.get("enrich_problems") or [] if "Last.fm" in p), None)
+        problem = data.get("lastfm_problem")
         if problem:
             text = f"{bad} Last.fm isn't working: {problem}"
         elif not data.get("lastfm_used"):
@@ -645,6 +666,10 @@ class MainWindow(QMainWindow):
 
     def sync(self) -> None:
         if self._thread is not None:
+            if isinstance(self._worker, SyncWorker):
+                self._worker.cancel()
+                self.sync_btn.setEnabled(False)
+                self.sync_btn.setText("Cancelling…")
             return
         client_id = config.load_client_id()
         if not client_id:
@@ -652,7 +677,12 @@ class MainWindow(QMainWindow):
                 return
             client_id = config.load_client_id()
         self.status.setText("Connecting to Spotify…")
-        self._start(SyncWorker(client_id), self._on_done, self._on_failed)
+        worker = SyncWorker(client_id)
+        worker.cancelled.connect(self._on_cancelled)
+        worker.cancelled.connect(lambda: self._thread and self._thread.quit())
+        self._start(worker, self._on_done, self._on_failed)
+        self.sync_btn.setText("Cancel sync")
+        self.sync_btn.setEnabled(True)
 
     def _start(self, worker: QObject, on_done, on_failed) -> None:
         self.sync_btn.setEnabled(False)
@@ -691,8 +721,17 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, "Sync failed", f"Loom couldn't read your library.\n\n{message}")
         self._restore_status()
 
+    def _on_cancelled(self) -> None:
+        # The playlists may already be saved; show whatever made it to disk.
+        saved = library.load(config.library_path())
+        if saved:
+            self.set_library(saved)
+        self._restore_status()
+        self.status.setText(self.status.text() + "\nSync cancelled. Next sync picks up where it stopped.")
+
     def _cleanup(self) -> None:
         self.bar.hide()
+        self.sync_btn.setText("Sync library")
         self.sync_btn.setEnabled(True)
         self._worker.deleteLater()
         self._thread.deleteLater()

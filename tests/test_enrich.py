@@ -130,3 +130,53 @@ def test_empty_results_are_retried_later(tmp_path, monkeypatch):
     monkeypatch.setattr(enrich.time, "time", lambda: real() + enrich.RETRY_EMPTY_AFTER + 60)
     enrich.enrich(make_library(), FakeSpotify(), cache, session=session)
     assert asked() == 2
+
+
+def test_stops_asking_spotify_when_it_has_no_genres(tmp_path):
+    class Empty(FakeSpotify):
+        def artists(self, ids):
+            self.calls += 1
+            return {"artists": [{"id": i, "genres": []} for i in ids]}
+
+    lib = make_library()
+    for n in range(200):  # 200 more artists with no Spotify genres
+        lib["tracks"][f"x{n}"] = {"id": f"x{n}", "name": "", "artists": [{"id": f"a{n}", "name": f"N{n}"}],
+                                  "album": {"name": "", "release_date": ""}, "duration_ms": 1}
+    sp = Empty()
+    enrich.enrich(lib, sp, tmp_path / "c.json", session=FakeSession())
+    assert sp.calls == 1  # gave up after the first batch instead of asking about all 202 artists
+    assert "stopped asking" in lib["enrich_problems"][0]
+
+
+def test_cancel_keeps_progress(tmp_path):
+    import pytest
+    from loom.spotify import Cancelled
+
+    calls = []
+
+    def progress(message, done, total):
+        calls.append(message)
+        if "BPM" in message:
+            raise Cancelled()
+
+    cache = tmp_path / "c.json"
+    with pytest.raises(Cancelled):
+        enrich.enrich(make_library(), FakeSpotify(), cache, progress=progress, session=FakeSession())
+    saved = enrich.load_cache(cache)
+    assert saved["spotify_genres"]["A"] == ["indie rock"]  # genres found before the cancel are kept
+    assert saved["features"]  # and the BPM batch that finished
+
+
+def test_long_rate_limit_is_reported_not_slept(monkeypatch):
+    import pytest
+    import spotipy
+    from spotipy.exceptions import SpotifyException
+    from loom.spotify import LoomSpotify, RateLimited
+
+    def limited(self, method, url, payload, params):
+        raise SpotifyException(429, -1, "slow down", headers={"Retry-After": "7200"})
+
+    monkeypatch.setattr(spotipy.Spotify, "_internal_call", limited)
+    sp = LoomSpotify(auth="x")
+    with pytest.raises(RateLimited, match="2 hr"):
+        sp.artist("abc")

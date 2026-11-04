@@ -112,7 +112,7 @@ def fetch_library(sp, progress: Progress = _noop) -> dict[str, Any]:
             }
         )
 
-    progress("Done", 1, 1)
+    progress("Playlists done", 1, 1)
     return {
         "version": 1,
         "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
