@@ -35,8 +35,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import __version__, config, library
+from .. import __version__, config, discover, library
 from .genre_page import GenrePage
+from .discover_page import DiscoverPage
 from .journey_page import JourneyPage
 from .models import TrackFilter, TrackTableModel
 from .theme import STYLESHEET
@@ -606,7 +607,13 @@ class MainWindow(QMainWindow):
         self.genre_page.publish_requested.connect(self.publish_groups)
         self.journey_page = JourneyPage()
         self.journey_page.save_requested.connect(self.save_journey)
-        for page in (self.empty, self.overview, self.tracks, self.genre_page, self.journey_page):
+        self.discover_page = DiscoverPage()
+        self.discover_page.search_requested.connect(self.run_discover)
+        self.discover_page.save_requested.connect(self.save_discovered)
+        self.discover_page.journey_requested.connect(self.journey_from_discover)
+        self.discovered = discover.load(config.discover_path())
+        for page in (self.empty, self.overview, self.tracks, self.genre_page, self.journey_page,
+                     self.discover_page):
             self.stack.addWidget(page)
         outer.addWidget(self.stack, 1)
         self.setCentralWidget(root)
@@ -639,6 +646,8 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.nav_genres)
         self.nav_journeys = self._nav_button("Journeys", self.show_journeys)
         lay.addWidget(self.nav_journeys)
+        self.nav_discover = self._nav_button("Discover", self.show_discover)
+        lay.addWidget(self.nav_discover)
         lay.addSpacing(14)
         self.playlist_list = QTreeWidget()
         self.playlist_list.setHeaderHidden(True)
@@ -690,13 +699,16 @@ class MainWindow(QMainWindow):
             self.nav_overview.setEnabled(False)
             self.nav_genres.setEnabled(False)
             self.nav_journeys.setEnabled(False)
+            self.nav_discover.setEnabled(False)
             return
         self.nav_liked.setEnabled(True)
         self.nav_overview.setEnabled(True)
         self.nav_genres.setEnabled(True)
         self.nav_journeys.setEnabled(True)
+        self.nav_discover.setEnabled(True)
         self.genre_page.set_library(data)
-        self.journey_page.set_library(data)
+        self.journey_page.set_library(discover.merged(data, self.discovered))
+        self.discover_page.set_result(discover.merged(data, self.discovered), self.discovered)
         self._fill_sidebar()
         self.playlist_list.blockSignals(False)
         when = datetime.fromisoformat(data["fetched_at"]).astimezone().strftime("%b %d, %H:%M")
@@ -735,6 +747,81 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.journey_page)
         if self.journey_page.result is None:
             self.journey_page.rebuild(seed=None)
+
+    # ---- discover
+
+    def show_discover(self) -> None:
+        if not self.data:
+            return
+        self.nav_discover.setChecked(True)
+        self._clear_playlist_selection()
+        self.stack.setCurrentWidget(self.discover_page)
+
+    def run_discover(self, genre: str, decade: str, count: int, skip_owned: bool) -> None:
+        if self._thread is not None or not self.data:
+            return
+        lastfm_key = config.load_lastfm_key()
+        data = self.data
+        worker = CallWorker(config.load_client_id(), None)
+
+        def job(sp):
+            result = discover.find(sp, genre, decade or None, count, data, skip_owned, lastfm_key,
+                                   progress=worker.progress.emit)
+            if result["order"]:
+                worker.progress.emit("Looking up BPM and genres for the songs found", 0, 0)
+                discover.add_song_data(result, sp, config.enrich_cache_path(), lastfm_key,
+                                       worker.progress.emit)
+            return result
+
+        worker.fn = job
+        self.discover_page.set_busy(True, "Searching…")
+        self._start(worker, self._on_discovered, self._on_discover_failed)
+
+    def _on_discovered(self, result: dict) -> None:
+        self.discovered = result
+        discover.save(result, config.discover_path())
+        view = discover.merged(self.data, result)
+        self.discover_page.set_busy(False)
+        self.discover_page.set_result(view, result)
+        self.journey_page.set_library(view)
+        self._restore_status()
+
+    def _on_discover_failed(self, message: str) -> None:
+        self.discover_page.set_busy(False, "The search didn't finish.")
+        QMessageBox.warning(self, "Couldn't search", message)
+        self._restore_status()
+
+    def save_discovered(self, name: str, track_ids: list) -> None:
+        if self._thread is not None or not self.data:
+            return
+        from .. import publish
+
+        if not name.startswith(publish.PREFIX):
+            name = publish.playlist_name(name)
+        label = (self.discovered or {}).get("label", "songs")
+        data = {**self.data, "saved": []}
+        self.discover_page.set_busy(True, "Saving to Spotify…")
+        self._start(CallWorker(config.load_client_id(),
+                               lambda sp: publish.save_sorted(sp, data, name, track_ids,
+                                                              f"from Discover ({label})")),
+                    self._on_discover_saved, self._on_discover_save_failed)
+
+    def _on_discover_saved(self, r: dict) -> None:
+        self._merge_saved(r.get("saved") or [])
+        verb = "Created" if r["created"] else "Updated"
+        self.discover_page.set_busy(False, f"{verb} “{(r['created'] or r['updated'])[0]}” with {r['songs']} songs. "
+                                           "It's in Spotify now.")
+        self._restore_status()
+
+    def _on_discover_save_failed(self, message: str) -> None:
+        self.discover_page.set_busy(False, "Couldn't save the playlist.")
+        QMessageBox.warning(self, "Couldn't save the playlist", message)
+        self._restore_status()
+
+    def journey_from_discover(self) -> None:
+        self.journey_page.use_source("discover")
+        self.show_journeys()
+        self.journey_page.rebuild(seed=None)
 
     def save_journey(self, result: dict, name: str) -> None:
         if self._thread is not None or not self.data:
@@ -865,7 +952,7 @@ class MainWindow(QMainWindow):
         library.save(self.data, config.library_path())
         self._fill_sidebar()
         self.genre_page.set_library(self.data)
-        self.journey_page.set_library(self.data)
+        self.journey_page.set_library(discover.merged(self.data, self.discovered))
 
     def save_sorted(self, name: str, track_ids: list, how: str) -> None:
         if self._thread is not None or not self.data:
