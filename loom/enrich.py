@@ -103,8 +103,33 @@ class NoSpotifyGenres(Exception):
 GENRE_PROBE = 30  # if this many artists in a row come back with no genres, stop asking Spotify
 
 
+ALIASES = {"rnb": "r&b", "r and b": "r&b", "rhythm and blues": "r&b", "hiphop": "hip hop",
+           "electronica": "electronic", "alt country": "alt-country", "alternative country": "alt-country",
+           "rock n roll": "rock and roll",
+           "rock & roll": "rock and roll", "rock'n'roll": "rock and roll"}
+
+
+def normalize_genre(name: str) -> str:
+    """'Hip-Hop' -> 'hip hop', 'rnb' -> 'r&b', so the same genre isn't counted twice."""
+    g = " ".join(name.lower().replace("_", " ").split())
+    if g not in ("alt-country", "lo-fi", "k-pop", "j-pop", "nu-metal", "post-rock", "post-punk"):
+        g = g.replace("-", " ")
+    g = " ".join(g.split())
+    return ALIASES.get(g, g)
+
+
+def _clean(genres: list[str]) -> list[str]:
+    out: list[str] = []
+    for g in genres:
+        n = normalize_genre(g)
+        if n and n not in out:
+            out.append(n)
+    return out
+
+
 def fetch_spotify_genres(
-    sp, artist_ids: list[str], progress: Progress = _noop, out: dict[str, list[str]] | None = None
+    sp, artist_ids: list[str], progress: Progress = _noop, out: dict[str, list[str]] | None = None,
+    allow_single: bool = True,
 ) -> dict[str, list[str]]:
     """Artist genres from Spotify, written into `out` as they arrive (so a later failure keeps
     what was found). Uses the 50-at-a-time endpoint, falling back to one artist per request if
@@ -134,7 +159,7 @@ def fetch_spotify_genres(
                 progress("Reading artist genres from Spotify", done, total)
                 continue
             except SpotifyException as exc:
-                if exc.http_status == 429:
+                if exc.http_status == 429 or not allow_single:
                     raise
                 bulk_ok = False
         for aid in batch:
@@ -311,7 +336,9 @@ def enrich(
     if missing_artists:
         found: dict[str, list[str]] = {}
         try:
-            fetch_spotify_genres(sp, missing_artists, progress, found)
+            # One-at-a-time lookups cost a request per artist and can earn a day-long rate limit,
+            # so only fall back to them when there's no Last.fm key to fill the gaps instead.
+            fetch_spotify_genres(sp, missing_artists, progress, found, allow_single=not lastfm_key)
         except NoSpotifyGenres:
             # Spotify isn't giving this app genres. Mark everyone as checked so Last.fm takes over.
             found.update({a: [] for a in missing_artists if a not in found})
@@ -364,8 +391,8 @@ def enrich(
 
     library["artists"] = {}
     for aid, name in artists.items():
-        spotify = cache["spotify_genres"].get(aid) or []
-        lastfm = cache["lastfm_tags"].get(name.lower()) or []
+        spotify = _clean(cache["spotify_genres"].get(aid) or [])
+        lastfm = _clean(cache["lastfm_tags"].get(name.lower()) or [])
         library["artists"][aid] = {
             "name": name,
             "genres": spotify or lastfm,

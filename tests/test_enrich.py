@@ -208,3 +208,30 @@ def test_real_http_429_with_long_retry_after_returns_fast():
         sp._get(f"http://127.0.0.1:{server.server_port}/v1/artists")
     assert time.time() - start < 5
     server.shutdown()
+
+
+def test_genre_names_are_normalized():
+    assert enrich.normalize_genre("Hip-Hop") == "hip hop"
+    assert enrich.normalize_genre("rnb") == "r&b"
+    assert enrich.normalize_genre("  Red   Dirt ") == "red dirt"
+    assert enrich.normalize_genre("alt-country") == "alt-country"
+    assert enrich._clean(["hip-hop", "Hip Hop", "rap"]) == ["hip hop", "rap"]
+
+
+def test_no_single_lookups_when_lastfm_is_set(tmp_path):
+    from spotipy.exceptions import SpotifyException
+
+    class NoBulk(FakeSpotify):
+        singles = 0
+
+        def artists(self, ids):
+            raise SpotifyException(403, -1, "Forbidden")
+
+        def artist(self, aid):
+            NoBulk.singles += 1
+            return {"id": aid, "genres": ["x"]}
+
+    lib = make_library()
+    enrich.enrich(lib, NoBulk(), tmp_path / "c.json", lastfm_key="k", session=FakeSession())
+    assert NoBulk.singles == 0
+    assert lib["artists"]["B"]["genres"] == ["shoegaze", "dream pop"]  # Last.fm filled in
