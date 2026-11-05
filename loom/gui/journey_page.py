@@ -616,7 +616,19 @@ class JourneyPage(QWidget):
             name = self.name.text().strip() or "Journey"
             if not name.startswith(publish.PREFIX):
                 name = publish.playlist_name(name)
-            self.save_requested.emit(self.result, name)
+            shape = self.shape.currentText().lstrip("★ ")
+            self.save_requested.emit({**self.result, "points": self.chart.get_points(),
+                                      "shape_label": "Custom" if self.shape.currentData() == self.CUSTOM else shape},
+                                     name)
+
+    def load_wave(self, points, name: str) -> None:
+        """Open a saved journey's wave for editing; saving again refills the same playlist."""
+        self.chart.set_points(points)
+        self._mark_custom()
+        self.rebuild(seed=None)
+        if name.startswith(publish.PREFIX):
+            name = name[len(publish.PREFIX):]
+        self.name.setText(name)
 
     def set_busy(self, busy: bool, message: str = "") -> None:
         self.save_btn.setEnabled(not busy and bool(self.result and self.result["track_ids"]))

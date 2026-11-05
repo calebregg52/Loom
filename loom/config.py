@@ -91,6 +91,10 @@ def save_ui(key: str, value) -> None:
     settings_path().write_text(yaml.safe_dump(data), encoding="utf-8")
 
 
+def journey_shapes_path() -> Path:
+    return app_dir() / "journey_shapes.json"
+
+
 def discover_path() -> Path:
     return app_dir() / "discover.json"
 
