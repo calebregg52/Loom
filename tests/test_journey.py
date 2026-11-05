@@ -1,0 +1,113 @@
+import random
+
+from loom import journey, publish
+
+
+def make_library(n=300, seed=1):
+    rng = random.Random(seed)
+    artists = {f"c{i}": ["country", "red dirt"] for i in range(12)}
+    artists.update({f"h{i}": ["hip hop", "trap"] for i in range(8)})
+    artists.update({f"r{i}": ["classic rock"] for i in range(6)})
+    tracks, liked = {}, []
+    names = list(artists)
+    for i in range(n):
+        a = rng.choice(names)
+        album = f"{a}-album{rng.randint(0, 2)}"
+        tracks[f"t{i}"] = {
+            "id": f"t{i}", "name": f"Song {i}", "artists": [{"id": a, "name": a}],
+            "album": {"id": album, "name": album, "release_date": "2020"}, "duration_ms": 200000,
+            "features": {"tempo": rng.uniform(70, 170), "energy": rng.random(),
+                         "key": rng.randint(0, 11), "mode": rng.randint(0, 1)} if rng.random() > 0.1 else None,
+        }
+        liked.append({"id": f"t{i}"})
+    lib = {"user": {"id": "me"}, "tracks": tracks, "liked": liked, "playlists": [],
+           "artists": {a: {"name": a, "genres": g, "genre_source": "lastfm"} for a, g in artists.items()}}
+    return lib
+
+
+def test_wind_down_goes_down_smoothly():
+    lib = make_library()
+    j = journey.build(lib, lib["liked"], "wind_down", 25, end_with_album=False)
+    bpms = [lib["tracks"][t]["features"]["tempo"] for t in j["track_ids"]]
+    assert len(bpms) == 25 and len(set(j["track_ids"])) == 25
+    assert sum(bpms[:5]) / 5 - sum(bpms[-5:]) / 5 > 30  # clearly slower by the end
+    assert j["targets"] == sorted(j["targets"], reverse=True)
+    assert j["skipped"] > 0  # songs without BPM are left out, and counted
+
+
+def test_build_up_and_arc_shapes():
+    lib = make_library()
+    up = journey.build(lib, lib["liked"], "build_up", 20, end_with_album=False)
+    b = [lib["tracks"][t]["features"]["tempo"] for t in up["track_ids"]]
+    assert sum(b[-5:]) / 5 - sum(b[:5]) / 5 > 30
+    arc = journey.build(lib, lib["liked"], "arc", 21, end_with_album=False)
+    t = arc["targets"]
+    peak = t.index(max(t))
+    assert 0 < peak < len(t) - 1 and t[0] < t[peak] > t[-1]
+
+
+def test_transitions_mostly_stay_in_genre():
+    lib = make_library()
+    j = journey.build(lib, lib["liked"], "steady", 20, end_with_album=False)
+    fams = [journey._family(lib, lib["tracks"][t]) for t in j["track_ids"]]
+    changes = sum(1 for a, b in zip(fams, fams[1:]) if a != b)
+    assert changes <= 4
+
+
+def test_genre_filter_and_start_song():
+    lib = make_library()
+    start = next(t for t in lib["tracks"].values() if t["features"] and t["artists"][0]["id"].startswith("c"))
+    j = journey.build(lib, lib["liked"], "wind_down", 15, start_id=start["id"], genre_family="Country",
+                      end_with_album=False)
+    assert j["track_ids"][0] == start["id"]
+    assert all(lib["tracks"][t]["artists"][0]["id"].startswith("c") for t in j["track_ids"])
+
+
+def test_ends_with_an_album_near_the_final_bpm():
+    lib = make_library()
+    j = journey.build(lib, lib["liked"], "wind_down", 20, end_with_album=True)
+    album = j["album"]
+    assert album and album["known_track_ids"]
+    assert not set(album["known_track_ids"]) & set(j["track_ids"])  # no song twice
+    assert abs(album["avg_bpm"] - j["targets"][-1]) < 40
+
+
+def test_seed_gives_different_but_valid_variations():
+    lib = make_library()
+    a = journey.build(lib, lib["liked"], "wind_down", 20, seed=1, end_with_album=False)["track_ids"]
+    b = journey.build(lib, lib["liked"], "wind_down", 20, seed=2, end_with_album=False)["track_ids"]
+    assert a != b and len(a) == len(b) == 20
+
+
+def test_camelot_and_half_time():
+    assert journey.camelot({"features": {"key": 0, "mode": 1}}) == (8, "B")   # C major
+    assert journey.camelot({"features": {"key": 9, "mode": 0}}) == (8, "A")   # A minor
+    c, g = {"features": {"key": 0, "mode": 1}}, {"features": {"key": 7, "mode": 1}}
+    assert journey.key_distance(c, g) == 0.1
+    assert journey.tempo_gap(75, 150) < journey.tempo_gap(110, 150)
+
+
+class FakeSp:
+    def __init__(self):
+        self.added = []
+
+    def album_tracks(self, album_id, limit):
+        return {"items": [{"uri": f"spotify:track:a{i}"} for i in range(3)] + [{"uri": "spotify:track:t1"}],
+                "next": None}
+
+    def current_user_playlist_create(self, name, public, description):
+        assert public is False
+        return {"id": "new"}
+
+    def playlist_add_items(self, pid, uris):
+        self.added += uris
+
+
+def test_publish_journey_appends_full_album_without_duplicates():
+    sp = FakeSp()
+    lib = {"playlists": [], "user": {"id": "me"}}
+    j = {"track_ids": ["t1", "t2"], "album": {"id": "al", "known_track_ids": ["a0"]}}
+    r = publish.publish_journey(sp, lib, j, "Loom · Journey", "desc")
+    assert sp.added == ["spotify:track:t1", "spotify:track:t2", "spotify:track:a0",
+                        "spotify:track:a1", "spotify:track:a2"]
+    assert r["created"] == ["Loom · Journey"] and r["album_songs"] == 3

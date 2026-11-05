@@ -54,3 +54,12 @@ making duplicates, and playlists Loom didn't make are never touched.
 
 **Is Last.fm working?** The Overview page has a *Where genres came from* card that counts artists by source and
 shows a green, grey or red light for Last.fm. **Settings → Test key** checks a key straight away.
+
+## Journeys
+
+Open **Journeys** in the sidebar. Pick a source, an optional genre, a shape (**Wind down**, **Build up**,
+**Arc** or **Steady cruise**) and a length, then **Build journey**. Loom walks a smooth BPM/energy curve,
+choosing each next song to stay close to the last in genre and key (Camelot wheel), avoiding back-to-back
+artists, and, if ticked, finishes with a full album from your library that sits where the curve ends. The graph
+shows each song's BPM against the target. **Try another** gives a different take; **Save to Spotify** makes a
+private `Loom · Journey …` playlist (re-saving the same name refills it).

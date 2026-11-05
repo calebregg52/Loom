@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 
 from .. import __version__, config, library
 from .genre_page import GenrePage
+from .journey_page import JourneyPage
 from .models import TrackFilter, TrackTableModel
 from .theme import STYLESHEET
 
@@ -123,6 +124,31 @@ class PublishWorker(QObject):
             self.finished.emit(publish.publish(sp, data, groups, source_label, self.progress.emit))
         except Exception as exc:
             self.failed.emit(f"{type(exc).__name__}: {exc}")
+
+
+class JourneyWorker(QObject):
+    progress = Signal(str, int, int)
+    finished = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(self, client_id: str, data: dict, result: dict, name: str):
+        super().__init__()
+        self.args = (client_id, data, result, name)
+
+    def run(self) -> None:
+        try:
+            from .. import publish
+            from ..spotify import make_client
+
+            client_id, data, result, name = self.args
+            sp = make_client(client_id)
+            self.progress.emit(f"Saving “{name}”", 0, 0)
+            album = result.get("album")
+            desc = (f"A Loom journey: {len(result['track_ids'])} songs that move gradually in tempo"
+                    + (f", ending with the album {album['name']} by {album['artist']}." if album else "."))
+            self.finished.emit(publish.publish_journey(sp, data, result, name, desc[:300]))
+        except Exception as exc:
+            self.failed.emit(str(exc) if type(exc).__name__ == "RateLimited" else f"{type(exc).__name__}: {exc}")
 
 
 # ---------------------------------------------------------------- setup dialog
@@ -492,7 +518,9 @@ class MainWindow(QMainWindow):
         self.tracks = TrackPage()
         self.genre_page = GenrePage()
         self.genre_page.publish_requested.connect(self.publish_groups)
-        for page in (self.empty, self.overview, self.tracks, self.genre_page):
+        self.journey_page = JourneyPage()
+        self.journey_page.save_requested.connect(self.save_journey)
+        for page in (self.empty, self.overview, self.tracks, self.genre_page, self.journey_page):
             self.stack.addWidget(page)
         outer.addWidget(self.stack, 1)
         self.setCentralWidget(root)
@@ -523,6 +551,8 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.nav_overview)
         lay.addWidget(self.nav_liked)
         lay.addWidget(self.nav_genres)
+        self.nav_journeys = self._nav_button("Journeys", self.show_journeys)
+        lay.addWidget(self.nav_journeys)
         lay.addSpacing(14)
         lay.addWidget(label("  PLAYLISTS", "sectionLabel"))
         lay.addSpacing(4)
@@ -570,11 +600,14 @@ class MainWindow(QMainWindow):
             self.nav_liked.setEnabled(False)
             self.nav_overview.setEnabled(False)
             self.nav_genres.setEnabled(False)
+            self.nav_journeys.setEnabled(False)
             return
         self.nav_liked.setEnabled(True)
         self.nav_overview.setEnabled(True)
         self.nav_genres.setEnabled(True)
+        self.nav_journeys.setEnabled(True)
         self.genre_page.set_library(data)
+        self.journey_page.set_library(data)
         for p in data["playlists"]:
             item = QListWidgetItem(f"{p['name']}")
             item.setToolTip(f"{p['name']} · {len(p['tracks'])} songs · by {p['owner']}")
@@ -608,6 +641,34 @@ class MainWindow(QMainWindow):
         self.nav_genres.setChecked(True)
         self.playlist_list.setCurrentRow(-1)
         self.stack.setCurrentWidget(self.genre_page)
+
+    def show_journeys(self) -> None:
+        if not self.data:
+            return
+        self.nav_journeys.setChecked(True)
+        self.playlist_list.setCurrentRow(-1)
+        self.stack.setCurrentWidget(self.journey_page)
+        if self.journey_page.result is None:
+            self.journey_page.rebuild(seed=None)
+
+    def save_journey(self, result: dict, name: str) -> None:
+        if self._thread is not None or not self.data:
+            return
+        self.journey_page.set_busy(True, "Saving to Spotify…")
+        self._start(JourneyWorker(config.load_client_id(), self.data, result, name),
+                    self._on_journey_saved, self._on_journey_failed)
+
+    def _on_journey_saved(self, r: dict) -> None:
+        verb = "Created" if r["created"] else "Updated"
+        album = f", including {r['album_songs']} from the album" if r.get("album_songs") else ""
+        self.journey_page.set_busy(False, f"{verb} “{(r['created'] or r['updated'])[0]}” with {r['songs']} songs{album}. "
+                                          "It's in Spotify now.")
+        self._restore_status()
+
+    def _on_journey_failed(self, message: str) -> None:
+        self.journey_page.set_busy(False, "Couldn't save the journey.")
+        QMessageBox.warning(self, "Couldn't save the journey", message)
+        self._restore_status()
 
     def publish_groups(self, groups: list, source_label: str) -> None:
         if self._thread is not None or not self.data:
