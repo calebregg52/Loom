@@ -41,6 +41,11 @@ QComboBox QAbstractItemView {{ background: {RAISED}; border: 1px solid {BORDER};
 QSpinBox::up-button, QSpinBox::down-button {{ width: 16px; border: none; background: transparent; }}
 QListWidget::indicator {{ width: 16px; height: 16px; border-radius: 4px; border: 1px solid {MUTED}; background: transparent; }}
 QListWidget::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; image: none; }}
+QTreeWidget {{ background: transparent; border: none; outline: none; show-decoration-selected: 0; }}
+QTreeWidget::item {{ padding: 6px 6px; border-radius: 8px; }}
+QTreeWidget::item:hover {{ background: {RAISED}; }}
+QTreeWidget::item:selected {{ background: {RAISED}; color: white; }}
+QTreeWidget::branch {{ background: transparent; }}
 QListWidget {{ background: transparent; border: none; outline: none; }}
 QListWidget::item {{ padding: 7px 10px; border-radius: 8px; }}
 QListWidget::item:hover {{ background: {RAISED}; }}

@@ -63,3 +63,12 @@ choosing each next song to stay close to the last in genre and key (Camelot whee
 artists, and, if ticked, finishes with a full album from your library that sits where the curve ends. The graph
 shows each song's BPM against the target. **Try another** gives a different take; **Save to Spotify** makes a
 private `Loom · Journey …` playlist (re-saving the same name refills it).
+
+## Quick sort
+
+On any playlist or Liked Songs, pick **Sort by** (genre then BPM, BPM, energy, harmonic key, year, artist), or
+click a column header, then **Save as playlist** to save that order as a private `Loom · …` playlist. If a search
+is active, only the songs shown are saved.
+
+The sidebar keeps playlists Loom made under **Made by Loom** and the rest under **Your playlists**; click a heading
+to collapse it (Loom remembers).

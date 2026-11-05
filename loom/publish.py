@@ -14,7 +14,8 @@ def playlist_name(group_name: str) -> str:
 
 def save_playlist(sp, library: dict[str, Any], name: str, description: str, uris: list[str]) -> str:
     """Create a private playlist, or refill the one Loom made before with this name.
-    Returns "created" or "updated"."""
+    Returns "created" or "updated", and records the playlist in library["saved"] so the app can
+    show it straight away without a re-sync."""
     existing = {
         p["name"]: p["id"]
         for p in library.get("playlists", [])
@@ -32,6 +33,9 @@ def save_playlist(sp, library: dict[str, Any], name: str, description: str, uris
         result = "created"
     for start in range(100, len(uris), 100):
         sp.playlist_add_items(pid, uris[start:start + 100])
+    library.setdefault("saved", []).append(
+        {"id": pid, "name": name, "track_ids": [u.rsplit(":", 1)[-1] for u in uris]}
+    )
     return result
 
 
@@ -59,7 +63,7 @@ def publish_journey(sp, library: dict[str, Any], journey: dict[str, Any], name: 
         album_count = len(extra)
         uris += extra
     result = save_playlist(sp, library, name, description, uris)
-    return {"created": [name] if result == "created" else [],
+    return {"saved": library.get("saved", []), "created": [name] if result == "created" else [],
             "updated": [name] if result == "updated" else [], "songs": len(uris), "album_songs": album_count}
 
 
@@ -84,4 +88,11 @@ def publish(
         else:
             created.append(name)
     progress("Done", len(groups), len(groups))
-    return {"created": created, "updated": updated, "user": user_id}
+    return {"created": created, "updated": updated, "user": user_id, "saved": library.get("saved", [])}
+
+
+def save_sorted(sp, library: dict[str, Any], name: str, track_ids: list[str], how: str) -> dict[str, Any]:
+    description = f"{len(track_ids)} songs sorted {how} by Loom on {date.today():%b %d, %Y}."
+    result = save_playlist(sp, library, name, description, [f"spotify:track:{t}" for t in track_ids])
+    return {"created": [name] if result == "created" else [], "updated": [name] if result == "updated" else [],
+            "songs": len(track_ids), "saved": library.get("saved", [])}
