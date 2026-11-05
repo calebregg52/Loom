@@ -111,3 +111,26 @@ def test_publish_journey_appends_full_album_without_duplicates():
     assert sp.added == ["spotify:track:t1", "spotify:track:t2", "spotify:track:a0",
                         "spotify:track:a1", "spotify:track:a2"]
     assert r["created"] == ["Loom · Journey"] and r["album_songs"] == 3
+
+
+def test_custom_points_are_followed():
+    lib = make_library(600)
+    pts = [(0, 0.1), (0.5, 0.9), (1, 0.1)]
+    j = journey.build(lib, lib["liked"], pts, 31, end_with_album=False)
+    t = j["targets"]
+    assert t[15] == max(t) and t[0] < t[15] > t[-1]
+    bpms = [lib["tracks"][i]["features"]["tempo"] for i in j["track_ids"]]
+    assert sum(abs(b - x) for b, x in zip(bpms, t)) / len(t) < 12  # songs track the drawn curve
+
+
+def test_curve_helpers():
+    assert journey.clean_points([(0.5, 2), (0.2, -1)]) == [(0.0, 0.0), (0.2, 0.0), (0.5, 1.0), (1.0, 1.0)]
+    assert journey.curve_at([(0, 0), (1, 1)], 0.5) == 0.5
+    assert journey.curve_at([(0, 0.2), (0.5, 0.8), (1, 0.2)], 0.5) == 0.8
+
+
+def test_every_preset_builds():
+    lib = make_library()
+    for key in journey.PRESETS:
+        j = journey.build(lib, lib["liked"], key, 20, end_with_album=False)
+        assert len(j["track_ids"]) == 20, key

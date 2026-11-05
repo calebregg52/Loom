@@ -57,12 +57,20 @@ shows a green, grey or red light for Last.fm. **Settings → Test key** checks a
 
 ## Journeys
 
-Open **Journeys** in the sidebar. Pick a source, an optional genre, a shape (**Wind down**, **Build up**,
-**Arc** or **Steady cruise**) and a length, then **Build journey**. Loom walks a smooth BPM/energy curve,
+Open **Journeys** in the sidebar. Pick a source, an optional genre, a shape (15 presets such as **Wind down**, **Build up**,
+**Arc**, **Rollercoaster**, **Workout**, **Intervals** or **Big drop**) and a length, then **Build journey**. Loom walks a smooth BPM/energy curve,
 choosing each next song to stay close to the last in genre and key (Camelot wheel), avoiding back-to-back
 artists, and, if ticked, finishes with a full album from your library that sits where the curve ends. The graph
 shows each song's BPM against the target. **Try another** gives a different take; **Save to Spotify** makes a
 private `Loom · Journey …` playlist (re-saving the same name refills it).
+
+### Wave designer
+
+The graph above the track list is the journey's tempo wave, and you can edit it directly:
+drag a dot to move it, double-click empty space to add a point, right-click a dot to remove it.
+The journey rebuilds as you edit. **Flip** reverses the wave, **Invert** turns it upside down, and
+**Save shape…** keeps it in the Shape menu (marked ★) for next time.
+
 
 ## Quick sort
 

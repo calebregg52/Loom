@@ -16,12 +16,30 @@ from typing import Any
 
 from .genres import family_of, primary_group, song_genres
 
-SHAPES = {
-    "wind_down": "Wind down",
-    "build_up": "Build up",
-    "arc": "Arc (up, then down)",
-    "steady": "Steady cruise",
+# Each shape is a list of control points (x = position 0..1, y = 0 slowest .. 1 fastest within
+# the BPM range of the songs being used). The curve eases smoothly between points.
+PRESETS: dict[str, dict[str, Any]] = {
+    "wind_down": {"label": "Wind down", "points": [(0, 0.85), (1, 0.05)]},
+    "build_up": {"label": "Build up", "points": [(0, 0.1), (1, 0.95)]},
+    "arc": {"label": "Arc (up, then down)", "points": [(0, 0.3), (0.55, 1.0), (1, 0.05)]},
+    "steady": {"label": "Steady cruise", "points": [(0, 0.5), (1, 0.5)]},
+    "valley": {"label": "Valley (down, then back up)", "points": [(0, 0.8), (0.5, 0.05), (1, 0.85)]},
+    "wave": {"label": "Wave", "points": [(0, 0.5), (0.17, 0.9), (0.42, 0.15), (0.67, 0.9), (0.9, 0.2), (1, 0.4)]},
+    "rollercoaster": {"label": "Rollercoaster", "points": [(0, 0.3), (0.15, 0.95), (0.3, 0.2), (0.5, 1.0),
+                                                           (0.65, 0.15), (0.85, 0.9), (1, 0.1)]},
+    "slow_burn": {"label": "Slow burn (late climb)", "points": [(0, 0.1), (0.6, 0.25), (1, 1.0)]},
+    "sunrise": {"label": "Sunrise (climb, then cruise)", "points": [(0, 0.05), (0.4, 0.7), (1, 0.75)]},
+    "sunset": {"label": "Sunset (cruise, then fade)", "points": [(0, 0.7), (0.55, 0.65), (1, 0.0)]},
+    "workout": {"label": "Workout (warm-up, peak, cool-down)",
+                "points": [(0, 0.3), (0.15, 0.8), (0.75, 0.95), (1, 0.15)]},
+    "intervals": {"label": "Intervals (fast / slow)",
+                  "points": [(0, 0.2), (0.12, 0.95), (0.25, 0.2), (0.37, 0.95), (0.5, 0.2),
+                             (0.62, 0.95), (0.75, 0.2), (0.87, 0.95), (1, 0.15)]},
+    "drop": {"label": "Big drop", "points": [(0, 0.9), (0.45, 0.95), (0.55, 0.1), (1, 0.2)]},
+    "late_night": {"label": "Late night drive", "points": [(0, 0.55), (0.3, 0.6), (0.7, 0.4), (1, 0.25)]},
+    "party": {"label": "Party (build, hold, last song)", "points": [(0, 0.4), (0.3, 0.9), (0.85, 1.0), (1, 0.3)]},
 }
+SHAPES = {k: v["label"] for k, v in PRESETS.items()}  # key -> label, for menus
 
 
 # ---------------------------------------------------------------- song facts
@@ -67,25 +85,55 @@ def tempo_gap(bpm: float, target: float) -> float:
 # ---------------------------------------------------------------- the curve
 
 
-def target_curve(shape: str, length: int, start: float, low: float, high: float) -> list[float]:
-    """Target value per position, easing smoothly (no sudden jumps)."""
-    def ease(x: float) -> float:  # smoothstep
-        return x * x * (3 - 2 * x)
+def clean_points(points) -> list[tuple[float, float]]:
+    """Sort by position, clamp to 0..1, and make sure the curve spans the whole journey."""
+    pts = sorted((min(max(float(x), 0.0), 1.0), min(max(float(y), 0.0), 1.0)) for x, y in points)
+    if not pts:
+        return [(0.0, 0.5), (1.0, 0.5)]
+    if pts[0][0] > 0:
+        pts.insert(0, (0.0, pts[0][1]))
+    if pts[-1][0] < 1:
+        pts.append((1.0, pts[-1][1]))
+    return pts
 
-    out = []
-    for i in range(length):
-        x = i / max(length - 1, 1)
-        if shape == "wind_down":
-            v = start + (low - start) * ease(x)
-        elif shape == "build_up":
-            v = start + (high - start) * ease(x)
-        elif shape == "arc":
-            peak = high
-            v = start + (peak - start) * ease(x / 0.55) if x <= 0.55 else peak + (low - peak) * ease((x - 0.55) / 0.45)
-        else:
-            v = start
-        out.append(v)
-    return out
+
+def curve_at(points, x: float) -> float:
+    """Height 0..1 of the curve at position x, easing smoothly between control points."""
+    pts = clean_points(points)
+    for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+        if x <= x1 or (x1, y1) == pts[-1]:
+            if x1 <= x0:
+                return y1
+            u = min(max((x - x0) / (x1 - x0), 0.0), 1.0)
+            return y0 + (y1 - y0) * u * u * (3 - 2 * u)  # smoothstep
+    return pts[-1][1]
+
+
+def target_curve(points, length: int, low: float, high: float) -> list[float]:
+    """Target BPM per position."""
+    return [low + (high - low) * curve_at(points, i / max(length - 1, 1)) for i in range(length)]
+
+
+def shape_points(shape) -> list[tuple[float, float]]:
+    if isinstance(shape, (list, tuple)):
+        return clean_points(shape)
+    return clean_points(PRESETS.get(shape, PRESETS["steady"])["points"])
+
+
+def bpm_range(library: dict[str, Any], entries: list[dict[str, Any]], genre_family: str | None = None):
+    """The 10th to 90th percentile BPM of usable songs: the curve's 0 and 1."""
+    tracks = library["tracks"]
+    bpms = sorted(
+        tempo(tracks[e["id"]]) for e in entries
+        if e["id"] in tracks and tempo(tracks[e["id"]])
+        and (not genre_family or _family(library, tracks[e["id"]]) == genre_family)
+    )
+    if not bpms:
+        return None
+    if len(bpms) < 10:
+        return bpms[0], bpms[-1]
+    q = statistics.quantiles(bpms, n=10)
+    return q[0], q[-1]
 
 
 # ---------------------------------------------------------------- building
@@ -117,7 +165,7 @@ def genre_distance(library, a, b) -> float:
 def build(
     library: dict[str, Any],
     entries: list[dict[str, Any]],
-    shape: str = "wind_down",
+    shape: str | list = "wind_down",  # a preset key, or your own [(x, y), ...] points
     length: int = 25,
     start_id: str | None = None,
     genre_family: str | None = None,
@@ -141,7 +189,7 @@ def build(
 def _build(
     library: dict[str, Any],
     entries: list[dict[str, Any]],
-    shape: str,
+    shape: str | list,
     length: int,
     start_id: str | None,
     genre_family: str | None,
@@ -168,19 +216,19 @@ def _build(
                 "low": None, "high": None, "skipped": skipped}
 
     bpms = sorted(tempo(t) for t in pool)
-    q = statistics.quantiles(bpms, n=10) if len(bpms) >= 10 else [bpms[0]] * 9
-    low, high = q[0], q[-1]
+    if len(bpms) >= 10:
+        q = statistics.quantiles(bpms, n=10)
+        low, high = q[0], q[-1]
+    else:
+        low, high = bpms[0], bpms[-1]
+    length = max(2, min(length, len(pool)))
+    targets = target_curve(shape_points(shape), length, low, high)
 
     if start_id and start_id in tracks and tempo(tracks[start_id]):
         first = tracks[start_id]
     else:
-        # A natural opener for the shape: fast for wind-downs, slow for build-ups, mid otherwise.
-        aim = {"wind_down": q[7], "build_up": q[1], "arc": q[3]}.get(shape, statistics.median(bpms))
-        first = min(pool, key=lambda t: abs(tempo(t) - aim) + rng.random() * 4)
+        first = min(pool, key=lambda t: abs(tempo(t) - targets[0]) + rng.random() * 4)
     start = tempo(first)
-    low, high = min(low, start), max(high, start)
-    length = max(2, min(length, len(pool)))
-    targets = target_curve(shape, length, start, low, high)
     e_vals = [energy(t) for t in pool if energy(t) is not None]
     e_low, e_high = (min(e_vals), max(e_vals)) if e_vals else (0.0, 1.0)
 
