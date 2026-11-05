@@ -39,6 +39,7 @@ from .. import __version__, config, discover, library
 from .genre_page import GenrePage
 from .discover_page import DiscoverPage
 from .journey_page import JourneyPage
+from .wave_thumb import SHAPE_ROLE, SidebarDelegate, WaveBanner, is_journey, load_shapes, playlist_bpms, remember_shape
 from .models import TrackFilter, TrackTableModel
 from .theme import STYLESHEET
 
@@ -484,6 +485,10 @@ class TrackPage(QWidget):
         tools.addWidget(self.save_btn)
         lay.addLayout(tools)
         lay.addSpacing(8)
+        self.banner = WaveBanner()
+        self.banner.hide()
+        lay.addWidget(self.banner)
+        lay.addSpacing(4)
         self._entries: list = []
         self._data: dict | None = None
 
@@ -513,7 +518,13 @@ class TrackPage(QWidget):
             h.setSectionResizeMode(col, mode)
         lay.addWidget(self.table, 1)
 
-    def show_tracks(self, title: str, subtitle: str, entries, data) -> None:
+    def show_tracks(self, title: str, subtitle: str, entries, data, wave=None) -> None:
+        """wave: (points or None, bpms, info) for a journey, to draw its shape above the songs."""
+        if wave:
+            self.banner.set_wave(wave[0], wave[1], title, wave[2])
+            self.banner.show()
+        else:
+            self.banner.hide()
         self.title.setText(title)
         self.subtitle.setText(subtitle)
         self.search.clear()
@@ -603,6 +614,7 @@ class MainWindow(QMainWindow):
         self.overview = OverviewPage()
         self.tracks = TrackPage()
         self.tracks.save_requested.connect(self.save_sorted)
+        self.tracks.banner.edit_requested.connect(self.edit_wave)
         self.genre_page = GenrePage()
         self.genre_page.publish_requested.connect(self.publish_groups)
         self.journey_page = JourneyPage()
@@ -654,6 +666,7 @@ class MainWindow(QMainWindow):
         self.playlist_list.setIndentation(14)
         self.playlist_list.setRootIsDecorated(False)
         self.playlist_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.playlist_list.setItemDelegate(SidebarDelegate(self.playlist_list))
         self.playlist_list.currentItemChanged.connect(self._on_tree_item)
         self.playlist_list.itemExpanded.connect(lambda it: self._remember_section(it, True))
         self.playlist_list.itemCollapsed.connect(lambda it: self._remember_section(it, False))
@@ -827,10 +840,15 @@ class MainWindow(QMainWindow):
         if self._thread is not None or not self.data:
             return
         self.journey_page.set_busy(True, "Saving to Spotify…")
+        self._pending_shape = {"points": result.get("points"), "shape_label": result.get("shape_label"),
+                               "fit_score": result.get("fit_score"), "priority": result.get("priority")}
         self._start(JourneyWorker(config.load_client_id(), {**self.data, "saved": []}, result, name),
                     self._on_journey_saved, self._on_journey_failed)
 
     def _on_journey_saved(self, r: dict) -> None:
+        for saved in r.get("saved") or []:
+            if getattr(self, "_pending_shape", None) and self._pending_shape.get("points"):
+                remember_shape(config.journey_shapes_path(), saved["id"], {**self._pending_shape, "name": saved["name"]})
         self._merge_saved(r.get("saved") or [])
         verb = "Created" if r["created"] else "Updated"
         album = f", including {r['album_songs']} from the album" if r.get("album_songs") else ""
@@ -887,6 +905,7 @@ class MainWindow(QMainWindow):
         self.playlist_list.clear()
         open_state = config.load_ui("sidebar_open", {"loom": True, "mine": True})
         groups = {"loom": [], "mine": []}
+        shapes = load_shapes(config.journey_shapes_path())
         for i, p in enumerate(self.data["playlists"]):
             mine = p.get("owned") and p["name"].startswith(publish.PREFIX)
             groups["loom" if mine else "mine"].append((i, p))
@@ -910,6 +929,9 @@ class MainWindow(QMainWindow):
                 child = QTreeWidgetItem([name])
                 child.setData(0, Qt.UserRole, ("playlist", i))
                 child.setToolTip(0, f"{p['name']} · {len(p['tracks'])} songs · by {p['owner']}")
+                if key == "loom" and is_journey(p, shapes):
+                    child.setData(0, SHAPE_ROLE, {"points": (shapes.get(p["id"]) or {}).get("points"),
+                                                  "bpms": playlist_bpms(self.data, p)})
                 head.addChild(child)
             head.setExpanded(bool(open_state.get(key, True)))
             self._label_section(head)
@@ -998,8 +1020,17 @@ class MainWindow(QMainWindow):
         p = self.data["playlists"][row]
         sub = self._subtitle(p["tracks"])
         sub = f"By {p['owner']} · {sub}" if p["owner"] else sub
-        self.tracks.show_tracks(p["name"], sub, p["tracks"], self.data)
+        shapes = load_shapes(config.journey_shapes_path())
+        wave = None
+        if p.get("owned") and is_journey(p, shapes):
+            info = shapes.get(p["id"]) or {}
+            wave = (info.get("points"), playlist_bpms(self.data, p), info)
+        self.tracks.show_tracks(p["name"], sub, p["tracks"], self.data, wave)
         self.stack.setCurrentWidget(self.tracks)
+
+    def edit_wave(self, points: list, name: str) -> None:
+        self.show_journeys()
+        self.journey_page.load_wave(points, name)
 
     def _subtitle(self, entries) -> str:
         tracks = self.data["tracks"]

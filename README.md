@@ -110,3 +110,11 @@ into a private `Loom · Discover …` playlist, and **Build a journey from these
 them as the source. You can also choose *My songs + Discover* there to mix them with your library.
 
 Results are kept in `discover.json` and never mix into your own stats or genre playlists.
+
+### Journey shapes in the sidebar
+
+Each journey under **Made by Loom** shows a small picture of its wave. Open one to see the full
+wave above its songs, with the shape you drew dashed and the songs' real BPM solid, plus its fit
+score. **Edit this wave** opens it in Journeys, and saving again refills the same playlist.
+Loom keeps the waves in `journey_shapes.json`. Journeys saved before this version are drawn
+from their songs' BPM.
