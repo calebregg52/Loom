@@ -1,12 +1,15 @@
 """Compare two checkouts of Loom on the same synthetic library: python tools/compare_versions.py <repo root> [priority].
 Set WF_THOROUGH=1 for the Build-button search, WF_W={...} to try weights."""
 import os, sys, json, math, random, statistics, time
+from pathlib import Path
+HERE = Path(__file__).resolve().parent
+REPO = str(HERE.parent)
 root = sys.argv[1]
-sys.path.insert(0, "/home/claude/loom/tools")
+sys.path.insert(0, str(HERE))
 from bench_journeys import make_library, random_wave   # new generator (has mood/year/octave errors)
 for k in [k for k in sys.modules if k == "loom" or k.startswith("loom.")]:
     del sys.modules[k]
-sys.path = [p for p in sys.path if p.rstrip("/") != "/home/claude/loom"]
+sys.path = [p for p in sys.path if p.rstrip("/") != REPO]
 sys.path.insert(0, root)
 from loom import journey, wavefit
 import os
