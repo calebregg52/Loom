@@ -248,8 +248,16 @@ def _build(
             cost = tempo_gap(tempo(t), target) / 6
             cost += genre_distance(library, prev, t) * 1.5
             cost += key_distance(prev, t) * 0.8
-            if energy(t) is not None:
-                cost += abs(energy(t) - e_target) * 2
+            e = energy(t)
+            if e is not None:
+                cost += abs(e - e_target) * 2
+                if energy(prev) is not None:
+                    # keep the feel smooth song to song: small changes are cheap,
+                    # big jumps (more than ~0.2) get expensive fast
+                    jump = abs(e - energy(prev))
+                    cost += jump * 3 + max(0.0, jump - 0.2) * 12
+            else:
+                cost += 0.8  # unknown energy shouldn't look like a perfect match
             artist = t["artists"][0]["name"] if t["artists"] else ""
             if prev["artists"] and artist == prev["artists"][0]["name"]:
                 cost += 1.5

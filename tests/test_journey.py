@@ -134,3 +134,13 @@ def test_every_preset_builds():
     for key in journey.PRESETS:
         j = journey.build(lib, lib["liked"], key, 20, end_with_album=False)
         assert len(j["track_ids"]) == 20, key
+
+
+def test_energy_moves_smoothly_between_songs():
+    lib = make_library(600, seed=3)
+    for shape in ("build_up", "wind_down", "steady"):
+        j = journey.build(lib, lib["liked"], shape, 25, end_with_album=False)
+        e = [lib["tracks"][t]["features"]["energy"] for t in j["track_ids"]]
+        jumps = [abs(a - b) for a, b in zip(e, e[1:])]
+        assert max(jumps) < 0.35, (shape, max(jumps))
+        assert sum(jumps) / len(jumps) < 0.15
