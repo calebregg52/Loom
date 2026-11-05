@@ -515,6 +515,10 @@ class JourneyPage(QWidget):
         if data:
             self.source.addItem("All my songs", "all")
             self.source.addItem("Liked Songs", "liked")
+            if data.get("discover") and data["discover"].get("order"):
+                label = data["discover"].get("label") or "songs"
+                self.source.addItem(f"Discover: {label}", "discover")
+                self.source.addItem(f"My songs + Discover: {label}", "all+discover")
             for p in data["playlists"]:
                 if not p["name"].startswith(publish.PREFIX):
                     self.source.addItem(f"Playlist: {p['name']}", p["id"])
@@ -522,6 +526,11 @@ class JourneyPage(QWidget):
         self.source.blockSignals(False)
         self._fill_families()
         self._update_range()
+
+    def use_source(self, key: str) -> None:
+        i = self.source.findData(key)
+        if i >= 0:
+            self.source.setCurrentIndex(i)
 
     def _entries(self):
         return genres.source_entries(self.data, self.source.currentData()) if self.data else []

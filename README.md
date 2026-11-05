@@ -94,3 +94,19 @@ is active, only the songs shown are saved.
 
 The sidebar keeps playlists Loom made under **Made by Loom** and the rest under **Your playlists**; click a heading
 to collapse it (Loom remembers).
+
+## Discover
+
+Open **Discover** to find popular songs that aren't in your library yet, such as 80s rock. Pick a
+genre and a decade, choose how many songs you want, and click **Find songs**.
+
+Loom reads Last.fm's tag charts (for example, the "80s rock" tag) to rank songs by popularity, then
+finds each one on Spotify. It also runs a filtered Spotify search (`genre:"rock" year:1980-1989`).
+Spotify stopped giving new apps popularity numbers in February 2026, so Last.fm is what puts the
+big hits first. Without a Last.fm key, Loom uses Spotify search on its own.
+
+The songs found get BPM and genres the same way your library does. **Save to Spotify** turns them
+into a private `Loom · Discover …` playlist, and **Build a journey from these** opens Journeys with
+them as the source. You can also choose *My songs + Discover* there to mix them with your library.
+
+Results are kept in `discover.json` and never mix into your own stats or genre playlists.

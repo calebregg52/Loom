@@ -65,7 +65,14 @@ def primary_group(library: dict[str, Any], track: dict[str, Any], mode: str) -> 
 
 
 def source_entries(library: dict[str, Any], source: str) -> list[dict[str, Any]]:
-    """source: "liked", "all", or a playlist id."""
+    """source: "liked", "all", a playlist id, or (with Discover results mixed in, see
+    discover.merged) "discover" and "all+discover"."""
+    if source == "discover":
+        return [{"id": t} for t in (library.get("discover") or {}).get("order", [])]
+    if source == "all+discover":
+        mine = source_entries(library, "all")
+        have = {e["id"] for e in mine}
+        return mine + [e for e in source_entries(library, "discover") if e["id"] not in have]
     if source == "liked":
         return library.get("liked", [])
     if source == "all":
