@@ -41,6 +41,9 @@ class TrackTableModel(QAbstractTableModel):
         ]
         self.endResetModel()
 
+    def track_id(self, row: int) -> str:
+        return self._rows[row][1]["id"]
+
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self._rows)
 

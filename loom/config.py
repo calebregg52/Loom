@@ -79,6 +79,18 @@ def save_lastfm_key(key: str) -> None:
     _save_setting("LASTFM_API_KEY", key)
 
 
+def load_ui(key: str, default):
+    """Small UI preferences (like which sidebar sections are open)."""
+    value = (_settings().get("ui") or {}).get(key)
+    return default if value is None else value
+
+
+def save_ui(key: str, value) -> None:
+    data = _settings()
+    data.setdefault("ui", {})[key] = value
+    settings_path().write_text(yaml.safe_dump(data), encoding="utf-8")
+
+
 def enrich_cache_path() -> Path:
     return app_dir() / "song_data_cache.json"
 

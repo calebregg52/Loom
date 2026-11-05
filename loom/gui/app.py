@@ -19,8 +19,12 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QComboBox,
+    QInputDialog,
     QListWidget,
     QListWidgetItem,
+    QTreeWidget,
+    QTreeWidgetItem,
     QMainWindow,
     QMessageBox,
     QProgressBar,
@@ -33,6 +37,7 @@ from PySide6.QtWidgets import (
 
 from .. import __version__, config, library
 from .genre_page import GenrePage
+from .journey_page import JourneyPage
 from .models import TrackFilter, TrackTableModel
 from .theme import STYLESHEET
 
@@ -123,6 +128,50 @@ class PublishWorker(QObject):
             self.finished.emit(publish.publish(sp, data, groups, source_label, self.progress.emit))
         except Exception as exc:
             self.failed.emit(f"{type(exc).__name__}: {exc}")
+
+
+class CallWorker(QObject):
+    """Runs fn(sp) on a background thread with a fresh Spotify client."""
+    progress = Signal(str, int, int)
+    finished = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(self, client_id: str, fn):
+        super().__init__()
+        self.client_id, self.fn = client_id, fn
+
+    def run(self) -> None:
+        try:
+            from ..spotify import make_client
+
+            self.finished.emit(self.fn(make_client(self.client_id)))
+        except Exception as exc:
+            self.failed.emit(str(exc) if type(exc).__name__ == "RateLimited" else f"{type(exc).__name__}: {exc}")
+
+
+class JourneyWorker(QObject):
+    progress = Signal(str, int, int)
+    finished = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(self, client_id: str, data: dict, result: dict, name: str):
+        super().__init__()
+        self.args = (client_id, data, result, name)
+
+    def run(self) -> None:
+        try:
+            from .. import publish
+            from ..spotify import make_client
+
+            client_id, data, result, name = self.args
+            sp = make_client(client_id)
+            self.progress.emit(f"Saving “{name}”", 0, 0)
+            album = result.get("album")
+            desc = (f"A Loom journey: {len(result['track_ids'])} songs that move gradually in tempo"
+                    + (f", ending with the album {album['name']} by {album['artist']}." if album else "."))
+            self.finished.emit(publish.publish_journey(sp, data, result, name, desc[:300]))
+        except Exception as exc:
+            self.failed.emit(str(exc) if type(exc).__name__ == "RateLimited" else f"{type(exc).__name__}: {exc}")
 
 
 # ---------------------------------------------------------------- setup dialog
@@ -393,6 +442,8 @@ class OverviewPage(QWidget):
 
 
 class TrackPage(QWidget):
+    save_requested = Signal(str, list, str)  # suggested name, track ids, how it was sorted
+
     def __init__(self):
         super().__init__()
         lay = QVBoxLayout(self)
@@ -411,7 +462,29 @@ class TrackPage(QWidget):
         self.search.setClearButtonEnabled(True)
         head.addWidget(self.search, 0, Qt.AlignBottom)
         lay.addLayout(head)
-        lay.addSpacing(14)
+        lay.addSpacing(10)
+
+        from .. import sorting
+
+        tools = QHBoxLayout()
+        tools.addWidget(label("Sort by", "muted"))
+        self.sort_mode = QComboBox()
+        for key, text in sorting.MODES.items():
+            self.sort_mode.addItem(text, key)
+        self.sort_mode.currentIndexChanged.connect(self._apply_sort)
+        tools.addWidget(self.sort_mode)
+        tools.addStretch(1)
+        self.save_status = label("", "muted")
+        tools.addWidget(self.save_status)
+        self.save_btn = QPushButton("Save as playlist")
+        self.save_btn.setObjectName("primary")
+        self.save_btn.setToolTip("Save the songs in the order shown as a new private Spotify playlist")
+        self.save_btn.clicked.connect(self._save)
+        tools.addWidget(self.save_btn)
+        lay.addLayout(tools)
+        lay.addSpacing(8)
+        self._entries: list = []
+        self._data: dict | None = None
 
         self.model = TrackTableModel(self)
         self.proxy = TrackFilter(self)
@@ -443,9 +516,47 @@ class TrackPage(QWidget):
         self.title.setText(title)
         self.subtitle.setText(subtitle)
         self.search.clear()
-        self.model.set_rows(entries, data)
+        self._entries, self._data = list(entries), data
+        self.save_status.setText("")
+        self.sort_mode.blockSignals(True)
+        self.sort_mode.setCurrentIndex(0)
+        self.sort_mode.blockSignals(False)
+        self._apply_sort()
+
+    def _apply_sort(self) -> None:
+        from .. import sorting
+
+        if self._data is None:
+            return
+        ordered = sorting.sort_entries(self._data, self._entries, self.sort_mode.currentData())
+        self.model.set_rows(ordered, self._data)
         self.table.sortByColumn(0, Qt.AscendingOrder)
         self.table.scrollToTop()
+
+    def visible_track_ids(self) -> list:
+        ids = []
+        for row in range(self.proxy.rowCount()):
+            src = self.proxy.mapToSource(self.proxy.index(row, 0)).row()
+            ids.append(self.model.track_id(src))
+        return ids
+
+    def _save(self) -> None:
+        from .. import publish, sorting
+
+        ids = self.visible_track_ids()
+        if not ids:
+            return
+        mode = self.sort_mode.currentData()
+        base = self.title.text()
+        if base.startswith(publish.PREFIX):
+            base = base[len(publish.PREFIX):]
+        how = sorting.SHORT.get(mode, "in a custom order")
+        self.save_requested.emit(f"{base} · {how}", ids, how)
+
+    def set_busy(self, busy: bool, message: str = "") -> None:
+        self.save_btn.setEnabled(not busy)
+        self.sort_mode.setEnabled(not busy)
+        self.save_status.setText(message)
 
 
 class EmptyPage(QWidget):
@@ -490,9 +601,12 @@ class MainWindow(QMainWindow):
         self.empty.connect_clicked.connect(self.sync)
         self.overview = OverviewPage()
         self.tracks = TrackPage()
+        self.tracks.save_requested.connect(self.save_sorted)
         self.genre_page = GenrePage()
         self.genre_page.publish_requested.connect(self.publish_groups)
-        for page in (self.empty, self.overview, self.tracks, self.genre_page):
+        self.journey_page = JourneyPage()
+        self.journey_page.save_requested.connect(self.save_journey)
+        for page in (self.empty, self.overview, self.tracks, self.genre_page, self.journey_page):
             self.stack.addWidget(page)
         outer.addWidget(self.stack, 1)
         self.setCentralWidget(root)
@@ -523,13 +637,18 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.nav_overview)
         lay.addWidget(self.nav_liked)
         lay.addWidget(self.nav_genres)
+        self.nav_journeys = self._nav_button("Journeys", self.show_journeys)
+        lay.addWidget(self.nav_journeys)
         lay.addSpacing(14)
-        lay.addWidget(label("  PLAYLISTS", "sectionLabel"))
-        lay.addSpacing(4)
-
-        self.playlist_list = QListWidget()
+        self.playlist_list = QTreeWidget()
+        self.playlist_list.setHeaderHidden(True)
+        self.playlist_list.setIndentation(14)
+        self.playlist_list.setRootIsDecorated(False)
         self.playlist_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.playlist_list.currentRowChanged.connect(self.show_playlist)
+        self.playlist_list.currentItemChanged.connect(self._on_tree_item)
+        self.playlist_list.itemExpanded.connect(lambda it: self._remember_section(it, True))
+        self.playlist_list.itemCollapsed.connect(lambda it: self._remember_section(it, False))
+        self.playlist_list.itemClicked.connect(self._toggle_section)
         lay.addWidget(self.playlist_list, 1)
 
         lay.addSpacing(8)
@@ -570,15 +689,15 @@ class MainWindow(QMainWindow):
             self.nav_liked.setEnabled(False)
             self.nav_overview.setEnabled(False)
             self.nav_genres.setEnabled(False)
+            self.nav_journeys.setEnabled(False)
             return
         self.nav_liked.setEnabled(True)
         self.nav_overview.setEnabled(True)
         self.nav_genres.setEnabled(True)
+        self.nav_journeys.setEnabled(True)
         self.genre_page.set_library(data)
-        for p in data["playlists"]:
-            item = QListWidgetItem(f"{p['name']}")
-            item.setToolTip(f"{p['name']} · {len(p['tracks'])} songs · by {p['owner']}")
-            self.playlist_list.addItem(item)
+        self.journey_page.set_library(data)
+        self._fill_sidebar()
         self.playlist_list.blockSignals(False)
         when = datetime.fromisoformat(data["fetched_at"]).astimezone().strftime("%b %d, %H:%M")
         self.status.setText(f"Signed in as {data['user']['name']}\nSynced {when}")
@@ -589,15 +708,14 @@ class MainWindow(QMainWindow):
         if not self.data:
             return
         self.nav_overview.setChecked(True)
-        self.playlist_list.clearSelection()
-        self.playlist_list.setCurrentRow(-1)
+        self._clear_playlist_selection()
         self.stack.setCurrentWidget(self.overview)
 
     def show_liked(self) -> None:
         if not self.data:
             return
         self.nav_liked.setChecked(True)
-        self.playlist_list.setCurrentRow(-1)
+        self._clear_playlist_selection()
         liked = self.data["liked"]
         self.tracks.show_tracks("Liked Songs", self._subtitle(liked), liked, self.data)
         self.stack.setCurrentWidget(self.tracks)
@@ -606,8 +724,37 @@ class MainWindow(QMainWindow):
         if not self.data:
             return
         self.nav_genres.setChecked(True)
-        self.playlist_list.setCurrentRow(-1)
+        self._clear_playlist_selection()
         self.stack.setCurrentWidget(self.genre_page)
+
+    def show_journeys(self) -> None:
+        if not self.data:
+            return
+        self.nav_journeys.setChecked(True)
+        self._clear_playlist_selection()
+        self.stack.setCurrentWidget(self.journey_page)
+        if self.journey_page.result is None:
+            self.journey_page.rebuild(seed=None)
+
+    def save_journey(self, result: dict, name: str) -> None:
+        if self._thread is not None or not self.data:
+            return
+        self.journey_page.set_busy(True, "Saving to Spotify…")
+        self._start(JourneyWorker(config.load_client_id(), {**self.data, "saved": []}, result, name),
+                    self._on_journey_saved, self._on_journey_failed)
+
+    def _on_journey_saved(self, r: dict) -> None:
+        self._merge_saved(r.get("saved") or [])
+        verb = "Created" if r["created"] else "Updated"
+        album = f", including {r['album_songs']} from the album" if r.get("album_songs") else ""
+        self.journey_page.set_busy(False, f"{verb} “{(r['created'] or r['updated'])[0]}” with {r['songs']} songs{album}. "
+                                          "It's in Spotify now.")
+        self._restore_status()
+
+    def _on_journey_failed(self, message: str) -> None:
+        self.journey_page.set_busy(False, "Couldn't save the journey.")
+        QMessageBox.warning(self, "Couldn't save the journey", message)
+        self._restore_status()
 
     def publish_groups(self, groups: list, source_label: str) -> None:
         if self._thread is not None or not self.data:
@@ -622,10 +769,11 @@ class MainWindow(QMainWindow):
         if answer != QMessageBox.Yes:
             return
         self.genre_page.set_busy(True, "Saving playlists to Spotify…")
-        self._start(PublishWorker(config.load_client_id(), self.data, groups, source_label),
+        self._start(PublishWorker(config.load_client_id(), {**self.data, "saved": []}, groups, source_label),
                     self._on_published, self._on_publish_failed)
 
     def _on_published(self, result: dict) -> None:
+        self._merge_saved(result.get("saved") or [])
         made, refreshed = len(result["created"]), len(result["updated"])
         bits = []
         if made:
@@ -640,6 +788,118 @@ class MainWindow(QMainWindow):
         self.genre_page.set_busy(False, "Couldn't save the playlists.")
         QMessageBox.warning(self, "Couldn't create playlists", message)
         self._restore_status()
+
+    # ---- sidebar sections
+
+    SECTIONS = (("loom", "MADE BY LOOM"), ("mine", "YOUR PLAYLISTS"))
+
+    def _fill_sidebar(self) -> None:
+        from .. import publish
+
+        self.playlist_list.blockSignals(True)
+        self.playlist_list.clear()
+        open_state = config.load_ui("sidebar_open", {"loom": True, "mine": True})
+        groups = {"loom": [], "mine": []}
+        for i, p in enumerate(self.data["playlists"]):
+            mine = p.get("owned") and p["name"].startswith(publish.PREFIX)
+            groups["loom" if mine else "mine"].append((i, p))
+        for key, title in self.SECTIONS:
+            items = groups[key]
+            if not items and key == "loom":
+                continue
+            head = QTreeWidgetItem([""])
+            head.setData(0, Qt.UserRole, ("section", key))
+            head.setData(0, Qt.UserRole + 1, f"{title}  ·  {len(items)}")
+            head.setFlags(Qt.ItemIsEnabled)
+            f = head.font(0)
+            f.setPointSizeF(max(f.pointSizeF() - 2, 8))
+            f.setBold(True)
+            f.setLetterSpacing(f.SpacingType.AbsoluteSpacing, 1.2)
+            head.setFont(0, f)
+            head.setForeground(0, Qt.gray)
+            self.playlist_list.addTopLevelItem(head)
+            for i, p in items:
+                name = p["name"][len(publish.PREFIX):] if key == "loom" else p["name"]
+                child = QTreeWidgetItem([name])
+                child.setData(0, Qt.UserRole, ("playlist", i))
+                child.setToolTip(0, f"{p['name']} · {len(p['tracks'])} songs · by {p['owner']}")
+                head.addChild(child)
+            head.setExpanded(bool(open_state.get(key, True)))
+            self._label_section(head)
+        self.playlist_list.blockSignals(False)
+
+    @staticmethod
+    def _label_section(item) -> None:
+        item.setText(0, f"{'▾' if item.isExpanded() else '▸'}  {item.data(0, Qt.UserRole + 1)}")
+
+    def _remember_section(self, item, expanded: bool) -> None:
+        kind = item.data(0, Qt.UserRole)
+        if kind and kind[0] == "section":
+            self._label_section(item)
+            state = config.load_ui("sidebar_open", {"loom": True, "mine": True})
+            state[kind[1]] = expanded
+            config.save_ui("sidebar_open", state)
+
+    def _toggle_section(self, item, column: int) -> None:
+        kind = item.data(0, Qt.UserRole)
+        if kind and kind[0] == "section":
+            item.setExpanded(not item.isExpanded())
+
+    def _on_tree_item(self, current, previous) -> None:
+        kind = current.data(0, Qt.UserRole) if current else None
+        if kind and kind[0] == "playlist":
+            self.show_playlist(kind[1])
+
+    def _merge_saved(self, saved: list) -> None:
+        """Add playlists Loom just saved to the sidebar without a full re-sync."""
+        if not saved or not self.data:
+            return
+        by_id = {p["id"]: p for p in self.data["playlists"]}
+        for s in saved:
+            entry = {"id": s["id"], "name": s["name"], "description": "", "owner": self.data["user"]["name"],
+                     "owned": True, "image": None, "tracks": [{"id": t, "added_at": None} for t in s["track_ids"]]}
+            if s["id"] in by_id:
+                by_id[s["id"]].update(entry)
+            else:
+                self.data["playlists"].insert(0, entry)
+        library.save(self.data, config.library_path())
+        self._fill_sidebar()
+        self.genre_page.set_library(self.data)
+        self.journey_page.set_library(self.data)
+
+    def save_sorted(self, name: str, track_ids: list, how: str) -> None:
+        if self._thread is not None or not self.data:
+            return
+        from .. import publish
+
+        name, ok = QInputDialog.getText(self, "Save as playlist", "Playlist name:", text=name)
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        if not name.startswith(publish.PREFIX):
+            name = publish.playlist_name(name)
+        data = {**self.data, "saved": []}
+        self.tracks.set_busy(True, "Saving to Spotify…")
+        self._start(CallWorker(config.load_client_id(),
+                               lambda sp: publish.save_sorted(sp, data, name, track_ids, how)),
+                    self._on_sorted_saved, self._on_sorted_failed)
+
+    def _on_sorted_saved(self, r: dict) -> None:
+        self._merge_saved(r.get("saved") or [])
+        verb = "Created" if r["created"] else "Updated"
+        self.tracks.set_busy(False, f"{verb} “{(r['created'] or r['updated'])[0]}” with {r['songs']} songs.")
+        self._restore_status()
+
+    def _on_sorted_failed(self, message: str) -> None:
+        self.tracks.set_busy(False, "Couldn't save the playlist.")
+        QMessageBox.warning(self, "Couldn't save the playlist", message)
+        self._restore_status()
+
+    def _clear_playlist_selection(self) -> None:
+        self.playlist_list.blockSignals(True)
+        self.playlist_list.setCurrentItem(None)
+        self.playlist_list.clearSelection()
+        self.playlist_list.blockSignals(False)
 
     def show_playlist(self, row: int) -> None:
         if not self.data or row < 0:
