@@ -24,13 +24,18 @@ GENRES = {  # family: (genre tags, BPM mean, BPM spread, share of library)
 }
 
 
-def make_library(size=2300, seed=0):
+def make_library(size=2300, seed=0, octave_errors=0.05):
+    """A synthetic library shaped like a real one: genre-shaped tempo, energy, mood and era,
+    a share of songs with no BPM, some with BPM only (Deezer), and some BPMs reported at
+    half or double time (a common tempo-detection mistake)."""
     rng = random.Random(seed)
     artists, tracks, liked = {}, {}, []
+    era = {}
     for fam, (tags, *_rest) in GENRES.items():
         for a in range(int(400 * GENRES[fam][3])):
-            artists[f"{fam}-{a}"] = {"name": f"{fam}-{a}", "genres": tags[: rng.randint(1, 2)],
-                                     "genre_source": "lastfm"}
+            name = f"{fam}-{a}"
+            artists[name] = {"name": name, "genres": tags[: rng.randint(1, 2)], "genre_source": "lastfm"}
+            era[name] = rng.randint(1965, 2022)
     names = list(artists)
     weights = [GENRES[n.rsplit("-", 1)[0]][3] / (400 * GENRES[n.rsplit("-", 1)[0]][3]) for n in names]
     for i in range(size):
@@ -39,22 +44,32 @@ def make_library(size=2300, seed=0):
         _, mu, sd, _ = GENRES[fam]
         bpm = max(60, min(190, rng.gauss(mu, sd)))
         e = max(0.02, min(0.99, 0.2 + (bpm - 60) / 130 * 0.55 + rng.gauss(0, 0.16)))
+        ac = max(0.0, min(1.0, (0.55 if fam == "country" else 0.15) - (e - 0.5) * 0.6 + rng.gauss(0, 0.15)))
+        dance = max(0.0, min(1.0, (0.75 if fam == "hip hop" else 0.5) + rng.gauss(0, 0.12)))
+        val = max(0.0, min(1.0, 0.3 + e * 0.4 + rng.gauss(0, 0.2)))
+        loud = -14 + e * 10 + rng.gauss(0, 1.5)
+        reported = bpm
+        if rng.random() < octave_errors:
+            reported = bpm * 2 if bpm < 95 else bpm / 2
         roll = rng.random()
         if roll < 0.27:
             feats = None  # no BPM found
         elif roll < 0.38:
-            feats = {"tempo": bpm, "source": "deezer"}  # BPM but no energy/key
+            feats = {"tempo": reported, "source": "deezer"}  # BPM but no energy/key
         elif roll < 0.42:
             feats = {"tempo": bpm, "source": "artist average", "estimated": True}
         else:
-            feats = {"tempo": bpm, "energy": e, "key": rng.randint(0, 11), "mode": rng.randint(0, 1),
+            feats = {"tempo": reported, "energy": e, "key": rng.randint(0, 11), "mode": rng.randint(0, 1),
+                     "valence": val, "danceability": dance, "acousticness": ac, "loudness": loud,
                      "source": "reccobeats"}
         album = f"{a}-lp{rng.randint(0, 3)}"
+        year = era[a] + rng.randint(0, 8)
         tracks[f"t{i}"] = {
             "id": f"t{i}", "name": f"Song {i}", "artists": [{"id": a, "name": a}],
-            "album": {"id": album, "name": album, "release_date": "2020"},
+            "album": {"id": album, "name": album, "release_date": str(year)},
             "duration_ms": int(max(100, rng.gauss(215, 50)) * 1000),
             "track_number": rng.randint(1, 12), "disc_number": 1, "features": feats,
+            "_true_bpm": bpm,
         }
         liked.append({"id": f"t{i}"})
     return {"user": {"id": "me"}, "tracks": tracks, "liked": liked, "playlists": [], "artists": artists}

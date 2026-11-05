@@ -404,7 +404,7 @@ class JourneyPage(QWidget):
         self._live = QTimer(self)  # wait for a pause in editing before re-planning
         self._live.setSingleShot(True)
         self._live.setInterval(200)
-        self._live.timeout.connect(lambda: self.rebuild(seed=None))
+        self._live.timeout.connect(lambda: self.rebuild(seed=None, live=True))
         self.again_btn.setEnabled(False)
 
     # ---- shapes
@@ -545,7 +545,7 @@ class JourneyPage(QWidget):
                     self.family.addItem(f"{fam} ({n})", fam)
         self.family.setCurrentIndex(max(self.family.findData(current), 0))
 
-    def rebuild(self, seed: int | None) -> None:
+    def rebuild(self, seed: int | None, live: bool = False) -> None:
         if not self.data:
             return
         from PySide6.QtWidgets import QApplication
@@ -554,7 +554,7 @@ class JourneyPage(QWidget):
             self.result = j = journey.build(
                 self.data, self._entries(), self.chart.get_points(), self.length.value(),
                 genre_family=self.family.currentData(), end_with_album=self.album.isChecked(), seed=seed,
-                priority=self.priority.currentData() or "balanced",
+                priority=self.priority.currentData() or "balanced", thorough=not live,
             )
         finally:
             QApplication.restoreOverrideCursor()

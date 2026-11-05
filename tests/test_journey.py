@@ -225,3 +225,26 @@ def test_thin_spots_fit_score_and_reasons():
     j2.scale = wavefit.Scale([60, 200] * 3)  # pretend the wave asks for 200 BPM in the middle
     j2._tables()
     assert j2.thin_spots(), sc
+
+
+def _song(i, bpm, energy=0.5, feel=(0.5, 0.5, 0.5), year="2010", tags=("country",)):
+    t = {"id": f"x{i}", "name": f"S{i}", "artists": [{"id": f"a{i}", "name": f"a{i}"}],
+         "album": {"id": f"al{i}", "release_date": year}, "duration_ms": 200000,
+         "features": {"tempo": bpm, "energy": energy, "key": 0, "mode": 1, "valence": feel[0],
+                      "danceability": feel[1], "acousticness": feel[2], "loudness": -8}}
+    return t, {f"a{i}": {"name": f"a{i}", "genres": list(tags), "genre_source": "lastfm"}}
+
+
+def test_mood_era_and_tempo_guard_shape_the_handoffs():
+    songs, artists = zip(*[_song(0, 120), _song(1, 120), _song(2, 120, feel=(0.95, 0.9, 0.05)),
+                           _song(3, 120, year="1968"), _song(4, 164, energy=0.2),
+                           _song(5, 120, tags=("country", "red dirt")), _song(6, 120, tags=("trap",))])
+    lib = {"tracks": {t["id"]: t for t in songs}, "artists": {k: v for a in artists for k, v in a.items()},
+           "liked": [], "playlists": []}
+    pl = wavefit.Planner(lib, list(songs), [(0, 0.5), (1, 0.5)], 2)
+    s = pl.songs
+    assert pl.pair(s[0], s[1]) < pl.pair(s[0], s[2])  # a big change in mood and sound costs more
+    assert pl.pair(s[0], s[1]) < pl.pair(s[0], s[3])  # 1968 next to 2010 costs more
+    assert pl.pair(s[0], s[5]) < pl.pair(s[0], s[6])  # shared tags beat a different genre
+    assert s[4].shaky and not s[0].shaky  # 164 BPM at energy 0.2 is probably a double-time reading
+    assert wavefit._genre_dist(s[0], s[1]) == 0 and 0 < wavefit._genre_dist(s[0], s[5]) < 0.3

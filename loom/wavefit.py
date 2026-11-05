@@ -32,9 +32,9 @@ FOLD = 0.12  # half/double time counts as this far off (in log-BPM, about 12%)
 
 # How much each rule matters, per priority setting.
 PRIORITIES: dict[str, dict[str, float]] = {
-    "tight":    {"fit": 2.2, "dir": 1.2, "ef": 0.6, "ew": 0.5, "key": 0.6, "gen": 1.0},
-    "balanced": {"fit": 1.0, "dir": 0.6, "ef": 1.0, "ew": 0.6, "key": 1.0, "gen": 1.2},
-    "smooth":   {"fit": 0.45, "dir": 0.3, "ef": 1.7, "ew": 0.4, "key": 1.5, "gen": 1.7},
+    "tight":    {"fit": 2.8, "dir": 1.3, "ef": 0.6, "ew": 0.5, "key": 0.8, "gen": 1.0, "feel": 0.2, "era": 0.1},
+    "balanced": {"fit": 1.6, "dir": 0.7, "ef": 1.0, "ew": 0.6, "key": 1.6, "gen": 1.5, "feel": 0.3, "era": 0.2},
+    "smooth":   {"fit": 0.7, "dir": 0.35, "ef": 1.7, "ew": 0.4, "key": 1.8, "gen": 1.7, "feel": 0.6, "era": 0.35},
 }
 PRIORITY_LABELS = {"tight": "Tight to the wave", "balanced": "Balanced", "smooth": "Smooth flow"}
 ARTIST_GAP = {1: 4.0, 2: 3.0, 3: 2.0, 4: 1.5}  # same artist k songs back
@@ -50,8 +50,8 @@ def _huber(r: float) -> float:
 
 
 class Song:
-    __slots__ = ("i", "id", "bpm", "lb", "e", "cam", "genres", "fam", "artist", "album", "dur",
-                 "est_bpm", "est_genre")
+    __slots__ = ("i", "id", "bpm", "lb", "e", "cam", "ci", "genres", "fam", "artist", "album", "dur",
+                 "est_bpm", "est_genre", "feel", "year", "shaky")
 
     def __init__(self, i, t, facts, library):
         f = t.get("features") or {}
@@ -66,8 +66,22 @@ class Song:
         self.album = (t.get("album") or {}).get("id")
         self.dur = max((t.get("duration_ms") or 210_000) / 60_000, 0.5)  # minutes
         self.est_bpm = bool(f.get("estimated"))
+        self.ci = _cam_index(self.cam)
+        # "feel": mood, danceability, acousticness and loudness, each 0..1, when ReccoBeats has them
+        feel = (f.get("valence"), f.get("danceability"), f.get("acousticness"),
+                None if f.get("loudness") is None else min(max((f["loudness"] + 20) / 18, 0.0), 1.0))
+        self.feel = feel if all(v is not None for v in feel) else None
+        y = ((t.get("album") or {}).get("release_date") or "")[:4]
+        self.year = int(y) if y.isdigit() else None
+        # tempo detectors often report half or double time; a very fast, very calm song (or a very
+        # slow, very intense one) is probably one of those, so its tempo is treated as uncertain
+        self.shaky = self.e is not None and ((self.bpm >= 150 and self.e < 0.35) or (self.bpm < 80 and self.e > 0.75))
         self.est_genre = any((library["artists"].get(a.get("id") or a.get("name")) or {}).get("genre_source")
                              == "estimated" for a in (t.get("artists") or [])[:1])
+
+
+def _cam_index(cam) -> int:
+    return 24 if not cam else (cam[0] - 1) * 2 + (cam[1] == "B")
 
 
 def _key_dist(a, b) -> float:
@@ -79,12 +93,18 @@ def _key_dist(a, b) -> float:
     return 0.15 if steps == 0 else min(1.0, 0.45 + 0.15 * steps)
 
 
+_CAMS = [(n, l) for n in range(1, 13) for l in "AB"] + [None]
+KEY_TABLE = [[_key_dist(a, b) for b in _CAMS] for a in _CAMS]
+
+
 def _genre_dist(a: Song, b: Song) -> float:
+    """0 for the same genre tags, rising as fewer tags are shared; 1.2 across genre families."""
     if not a.genres or not b.genres:
         return 0.6
-    if a.genres & b.genres:
-        return 0.0
-    return 0.35 if a.fam and a.fam == b.fam else 1.2
+    shared = len(a.genres & b.genres)
+    if shared:
+        return 0.3 * (1 - shared / len(a.genres | b.genres))
+    return 0.45 if a.fam and a.fam == b.fam else 1.2
 
 
 # ---------------------------------------------------------------- the scale
@@ -170,6 +190,8 @@ class Planner:
         self.start = next((s for s in self.songs if s.id == start_id), None)
         self.handoff = handoff  # a Song-like stand-in for the album's opening track, or None
         self._gd: dict[tuple[int, int], float] = {}
+        self._fitc: dict[int, tuple] = {}
+        self._pairc: dict[int, float] = {}
         if self.songs:
             self._tables()
         durs = sorted(s.dur for s in self.songs) or [3.5]
@@ -183,6 +205,7 @@ class Planner:
     RES = 400
 
     def _tables(self):
+        self._fitc = {}
         xs = [k / self.RES for k in range(self.RES + 1)]
         self._ys = [self._wave_y(x) for x in xs]
         self._T = [math.log(self.scale.to_bpm(y)) for y in self._ys]
@@ -217,40 +240,71 @@ class Planner:
 
     def fit(self, s, x):
         """(cost, effective log-BPM, distance, folded) of song s at wave position x."""
-        t = self.target_lb(x)
+        xi = min(max(int(x * self.RES + 0.5), 0), self.RES)
+        key = s.i * (self.RES + 1) + xi
+        hit = self._fitc.get(key)
+        if hit is not None:
+            return hit
+        t = self._T[xi]
         d = abs(s.lb - t)
         eff, folded = s.lb, False
+        fold = FOLD * 0.25 if s.shaky else FOLD  # a probable half/double-time reading folds cheaply
         for alt in (s.lb + LN2, s.lb - LN2):
-            if abs(alt - t) + FOLD < d:
-                d, eff, folded = abs(alt - t) + FOLD, alt, True
+            if abs(alt - t) + fold < d:
+                d, eff, folded = abs(alt - t) + fold, alt, True
         cost = self.w["fit"] * _huber(d / 0.05)
         if s.e is not None:
-            cost += self.w["ew"] * _huber((s.e - self.e_target(x)) / 0.18)
+            cost += self.w["ew"] * _huber((s.e - self._E[xi]) / 0.18)
         else:
-            cost += 1.0  # unknown energy shouldn't look like a perfect match
+            cost += 1.5  # unknown energy shouldn't look like a perfect match
         if s.est_bpm:
             cost += 0.5
         if s.est_genre:
             cost += 0.2
-        return cost, eff, d, folded
+        if s.shaky:
+            cost += 0.3
+        hit = self._fitc[key] = (cost, eff, d, folded)
+        return hit
+
+    def pair(self, prev, cur):
+        """The part of a hand-off that depends only on the two songs (cached)."""
+        k = prev.i * 1_000_003 + cur.i
+        c = self._pairc.get(k)
+        if c is not None:
+            return c
+        w = self.w
+        c = 0.0
+        if cur.e is not None and prev.e is not None:
+            j = abs(cur.e - prev.e)
+            c += w["ef"] * (max(0.0, j - 0.08) / 0.1) ** 2
+        elif cur.e is None and prev.e is None:
+            c += 1.5
+        c += w["key"] * 1.5 * KEY_TABLE[prev.ci][cur.ci]
+        c += w["gen"] * 1.5 * _genre_dist(prev, cur)
+        if prev.feel is not None and cur.feel is not None:
+            a, b = prev.feel, cur.feel
+            d = 0.35 * abs(a[0] - b[0]) + 0.25 * abs(a[1] - b[1]) + 0.25 * abs(a[2] - b[2]) + 0.15 * abs(a[3] - b[3])
+            c += w["feel"] * (max(0.0, d - 0.1) / 0.12) ** 2
+        else:
+            c += w["feel"] * 0.3  # unknown feel: assume an average hand-off, not a perfect one
+        if prev.year and cur.year:
+            gap = abs(prev.year - cur.year)
+            if gap > 6:
+                c += w["era"] * min(2.0, (gap - 6) / 12)
+        self._pairc[k] = c
+        return c
 
     def step(self, prev2, prev, cur, prev_eff, cur_eff, x_prev, x_cur, back):
         """Cost of moving from prev to cur. back = the songs before cur, newest last."""
         w = self.w
-        dw = self.target_lb(x_cur) - self.target_lb(x_prev)
-        cost = w["dir"] * _huber(((cur_eff - prev_eff) - dw) / 0.06)
-        if cur.e is not None and prev.e is not None:
-            j = abs(cur.e - prev.e)
-            cost += w["ef"] * (max(0.0, j - 0.08) / 0.1) ** 2
-        elif cur.e is None and prev.e is None:
-            cost += 1.5
-        cost += w["key"] * 1.5 * _key_dist(prev.cam, cur.cam)
-        cost += w["gen"] * 1.5 * self.gdist(prev, cur)
+        res = self.RES
+        dw = self._T[min(max(int(x_cur * res + 0.5), 0), res)] - self._T[min(max(int(x_prev * res + 0.5), 0), res)]
+        r = abs(((cur_eff - prev_eff) - dw) / 0.06)
+        cost = w["dir"] * (r * r if r <= 1 else 2 * r - 1) + self.pair(prev, cur)
         if prev2 is not None and cur.fam and prev.fam and cur.fam == prev2.fam != prev.fam:
             cost += w["gen"]  # genre ping-pong: A, B, A
-        for k in range(1, 5):
-            if k > len(back):
-                break
+        n = len(back)
+        for k in range(1, 5 if n >= 4 else n + 1):
             b = back[-k]
             if b.artist and b.artist == cur.artist:
                 cost += ARTIST_GAP[k]
@@ -320,7 +374,8 @@ class Planner:
         lists = []
         for b in range(BUCKETS + 1):
             x = b / BUCKETS
-            scored = sorted(self.songs, key=lambda s: self.fit(s, x)[0])
+            banned = getattr(self, "_banned", ())
+            scored = sorted((s for s in self.songs if s.i not in banned), key=lambda s: self.fit(s, x)[0])
             lists.append(scored[:k])
         return lists
 
@@ -330,8 +385,13 @@ class Planner:
         t0 = time.perf_counter()
         n = self.n
         pool = len(self.songs)
-        k = min(pool, 45 if pool > 600 else 60)
-        beam_w = 160 if n <= 30 else 100
+        k = min(pool, getattr(self, "k_override", None) or 90)
+        beam_w = getattr(self, "beam_override", None) or (80 if n <= 30 else 60)
+        if self.seeded:  # "Try another": leave out a random sixth of the songs so it really differs
+            keep = {s.i for s in self.songs if self.rng.random() > 0.16 or s is self.start}
+            self._banned = {s.i for s in self.songs} - keep
+        else:
+            self._banned = set()
         self.short = short = self.shortlists(k)
         span_est = (n - 1) * self.med_dur
         noise = 0.6 if self.seeded else 0.0
@@ -387,59 +447,93 @@ class Planner:
         if self.seeded and len(finals) > 1:
             best_score = self.score(list(finals[0][2]))
             close = [st for st in finals[:6] if self.score(list(st[2])) <= best_score * 1.04 + 0.5]
-            chain = list(self.rng.choice(close)[2])
+            starts = [list(self.rng.choice(close)[2])]
         else:
-            chain = list(finals[0][2])
-        remaining = max(0.15, self.budget - (time.perf_counter() - t0))
-        return self.repair(chain, remaining)
+            # repair a few different finishers: the best one before repair isn't always best after
+            starts, seen = [], set()
+            for st in finals:
+                key = frozenset(s.i for s in st[2])
+                if key not in seen:
+                    seen.add(key)
+                    starts.append(list(st[2]))
+                if len(starts) == 3:
+                    break
+        best_chain, best_score = None, math.inf
+        for k, chain in enumerate(starts):
+            left = self.budget - (time.perf_counter() - t0)
+            share = max(0.1, left / (len(starts) - k))
+            chain = self.repair(chain, share)
+            sc = self.score(chain)
+            if sc < best_score:
+                best_chain, best_score = chain, sc
+        return best_chain
+
+    def _near(self, x, spread=0.07):
+        """All songs whose tempo (or half/double tempo) is within ~7% of the wave at x."""
+        if not hasattr(self, "_by_lb"):
+            self._by_lb = sorted(self.songs, key=lambda s: s.lb)
+            self._lbs = [s.lb for s in self._by_lb]
+        t = self.target_lb(x)
+        out = []
+        for c in (t, t - LN2, t + LN2):
+            lo = bisect.bisect_left(self._lbs, c - spread)
+            hi = bisect.bisect_right(self._lbs, c + spread)
+            out += self._by_lb[lo:hi]
+        return out
 
     def repair(self, chain, budget):
-        """Swap songs in and out while it lowers the total score."""
+        """Local search: swap a song for an unused one, swap neighbors, or move a song a few
+        places, keeping any change that lowers the total score."""
         t_end = time.perf_counter() + budget
         best = self.score(chain)
         fixed = 1 if self.start else 0
+        n = len(chain)
         improved = True
         while improved and time.perf_counter() < t_end:
             improved = False
             total, xs, effs, _ = self.score(chain, detail=True)
             used = {s.i for s in chain}
-            order = list(range(fixed, len(chain)))
-            self.rng.shuffle(order) if self.seeded else None
+            order = list(range(fixed, n))
+            if self.seeded:
+                self.rng.shuffle(order)
             for i in order:
                 if time.perf_counter() > t_end:
                     break
-                b = min(max(round(xs[i] * BUCKETS), 0), BUCKETS)
-                cands = {c.i: c for bb in (b - 1, b, b + 1) if 0 <= bb <= BUCKETS
-                         for c in self.short[bb] if c.i not in used}
+                # 1. replace with any unused song near the wave here (not just the shortlist)
                 base = self._local(chain, xs, effs, i)
-                trial_best, pick = base, None
-                for c in cands.values():
-                    old = chain[i]
+                trial = []
+                old = chain[i]
+                for c in self._near(xs[i]):
+                    if c.i in used or c.i in self._banned:
+                        continue
                     chain[i] = c
                     v = self._local(chain, xs, effs, i)
-                    chain[i] = old
-                    if v < trial_best - 1e-9:
-                        trial_best, pick = v, c
-                if pick is not None:
-                    old = chain[i]
-                    chain[i] = pick
+                    if v < base - 1e-9:
+                        trial.append((v, c))
+                chain[i] = old
+                trial.sort(key=lambda t: t[0])
+                for _, c in trial[:3]:  # confirm with the exact score (play times shift)
+                    chain[i] = c
                     new = self.score(chain)
                     if new < best - 1e-9:
                         best, improved = new, True
                         used.discard(old.i)
-                        used.add(pick.i)
+                        used.add(c.i)
                         total, xs, effs, _ = self.score(chain, detail=True)
-                    else:
-                        chain[i] = old
-                # swap with the next song
-                if i + 1 < len(chain):
-                    chain[i], chain[i + 1] = chain[i + 1], chain[i]
-                    new = self.score(chain)
+                        break
+                    chain[i] = old
+                # 2. move this song up to 3 places later or earlier (covers neighbor swaps)
+                for j in range(max(fixed, i - 3), min(n, i + 4)):
+                    if j == i:
+                        continue
+                    trial_chain = chain[:i] + chain[i + 1:]
+                    trial_chain.insert(j, chain[i])
+                    new = self.score(trial_chain)
                     if new < best - 1e-9:
+                        chain[:] = trial_chain
                         best, improved = new, True
                         total, xs, effs, _ = self.score(chain, detail=True)
-                    else:
-                        chain[i], chain[i + 1] = chain[i + 1], chain[i]
+                        break
         return chain
 
     # -- reporting
@@ -481,6 +575,10 @@ class Planner:
                                 else None),
                 "key_step": _key_dist(prev.cam, s.cam) if prev else None,
                 "genre_step": self.gdist(prev, s) if prev else None,
+                "feel_step": (sum(abs(a - b) for a, b in zip(prev.feel[:3], s.feel[:3])) / 3
+                              if prev and prev.feel and s.feel else None),
+                "year_gap": abs(prev.year - s.year) if prev and prev.year and s.year else None,
+                "tempo_guess": s.shaky,
                 "artist_repeat": any(b.artist == s.artist for b in chain[max(0, i - 4):i]) if s.artist else False,
             }
             details.append(info)
@@ -526,6 +624,13 @@ def why(detail: dict[str, Any], prev_name: str | None) -> str:
         g = detail["genre_step"]
         lines.append("Genre: " + ("same as the last song" if g == 0 else "same family" if g <= 0.35
                                   else "unknown" if g == 0.6 else "a change of genre"))
+        if detail.get("feel_step") is not None:
+            f = detail["feel_step"]
+            lines.append("Mood and sound: " + ("very close" if f < 0.08 else "close" if f < 0.15 else "a noticeable change"))
+        if detail.get("year_gap") is not None and detail["year_gap"] > 8:
+            lines.append(f"Era: {detail['year_gap']} years apart")
+    if detail.get("tempo_guess"):
+        lines.append("Its BPM looks like a half/double-time reading, so Loom treats it loosely")
     if detail["artist_repeat"]:
         lines.append("Same artist as a song just before it (nothing better fit)")
     return "\n".join(lines)
@@ -592,7 +697,7 @@ def choose_album(library, entries, planner: Planner, genre_family=None, exclude=
         opener.bpm = math.exp(opener.lb)
         es = [s.e for s in ss if s.e is not None]
         opener.e = statistics.mean(es) if es else None
-        opener.cam = None
+        opener.cam, opener.ci, opener.feel, opener.year, opener.shaky = None, 24, None, None, False
         opener.genres = frozenset().union(*(s.genres for s in ss))
         opener.fam = ss[0].fam
         opener.artist, opener.album, opener.dur = ss[0].artist, album_id, 4.0
@@ -612,7 +717,10 @@ def choose_album(library, entries, planner: Planner, genre_family=None, exclude=
 
 
 def build(library, entries, shape="wind_down", length=25, start_id=None, genre_family=None,
-          end_with_album=True, seed=None, priority="balanced", time_budget=1.2) -> dict[str, Any]:
+          end_with_album=True, seed=None, priority="balanced", time_budget=1.2,
+          thorough=False) -> dict[str, Any]:
+    """thorough: search wider and longer (about 1.5 s); used for Build and Try another, while
+    live edits of the wave use the quicker search."""
     J._memo.clear()
     tracks = library["tracks"]
     points = J.shape_points(shape)
@@ -646,6 +754,9 @@ def build(library, entries, shape="wind_down", length=25, start_id=None, genre_f
 
     planner = Planner(library, pool, points, length, priority, start_id, handoff=opener, seed=seed,
                       time_budget=time_budget)
+    if thorough:
+        planner.beam_override = 160
+        planner.budget = max(time_budget, 2.5)
     chain = planner.plan()
     rep = planner.report(chain)
     return {
