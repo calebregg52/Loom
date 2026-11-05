@@ -38,14 +38,24 @@ def library_path() -> Path:
     return app_dir() / "library.json"
 
 
+def _settings() -> dict:
+    path = settings_path()
+    if not path.exists():
+        return {}
+    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+
+def _save_setting(key: str, value: str) -> None:
+    data = _settings()
+    data[key] = value.strip()
+    settings_path().write_text(yaml.safe_dump(data), encoding="utf-8")
+
+
 def load_client_id() -> str | None:
     """Return the saved Spotify client ID, also picking up the old secret.yaml from the repo root."""
-    path = settings_path()
-    if path.exists():
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        value = (data.get("SPOTIFY_CLIENT_ID") or "").strip()
-        if value:
-            return value
+    value = (_settings().get("SPOTIFY_CLIENT_ID") or "").strip()
+    if value:
+        return value
     legacy = Path("secret.yaml")
     if legacy.exists():
         data = yaml.safe_load(legacy.read_text(encoding="utf-8")) or {}
@@ -57,9 +67,20 @@ def load_client_id() -> str | None:
 
 
 def save_client_id(client_id: str) -> None:
-    settings_path().write_text(
-        yaml.safe_dump({"SPOTIFY_CLIENT_ID": client_id.strip()}), encoding="utf-8"
-    )
+    _save_setting("SPOTIFY_CLIENT_ID", client_id)
+
+
+def load_lastfm_key() -> str | None:
+    """Optional Last.fm API key, used to fill in genres Spotify doesn't have."""
+    return (_settings().get("LASTFM_API_KEY") or "").strip() or None
+
+
+def save_lastfm_key(key: str) -> None:
+    _save_setting("LASTFM_API_KEY", key)
+
+
+def enrich_cache_path() -> Path:
+    return app_dir() / "song_data_cache.json"
 
 
 def forget_login() -> None:

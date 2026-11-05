@@ -51,7 +51,7 @@ def test_fetch_library(tmp_path):
     assert data["playlists"][0]["owned"] is True
     assert data["skipped_playlists"] == ["Editorial"]
     assert set(data["tracks"]) == {"t1", "t2", "t3", "t4"}
-    assert seen[-1][0] == "Done"
+    assert seen[-1][0] == "Playlists done"
 
     path = tmp_path / "library.json"
     library.save(data, path)

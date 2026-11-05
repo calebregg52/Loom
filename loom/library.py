@@ -35,6 +35,7 @@ def _track_record(track: dict[str, Any]) -> dict[str, Any]:
         "explicit": bool(track.get("explicit")),
         "popularity": track.get("popularity"),
         "uri": track.get("uri"),
+        "isrc": (track.get("external_ids") or {}).get("isrc"),
     }
 
 
@@ -112,7 +113,7 @@ def fetch_library(sp, progress: Progress = _noop) -> dict[str, Any]:
             }
         )
 
-    progress("Done", 1, 1)
+    progress("Playlists done", 1, 1)
     return {
         "version": 1,
         "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -146,7 +147,25 @@ def summary(library: dict[str, Any]) -> dict[str, Any]:
         for a in t["artists"]:
             artist_counts[a["name"]] = artist_counts.get(a["name"], 0) + 1
     top = sorted(artist_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+    artist_info = library.get("artists", {})
+    genre_counts: dict[str, int] = {}
+    for t in tracks.values():
+        genres = set()
+        for a in t["artists"]:
+            genres.update((artist_info.get(a.get("id")) or {}).get("genres", []))
+        for g in genres:
+            genre_counts[g] = genre_counts.get(g, 0) + 1
+    tempos = [t["features"]["tempo"] for t in tracks.values() if (t.get("features") or {}).get("tempo")]
     return {
+        "top_genres": sorted(genre_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:10],
+        "genres": len(genre_counts),
+        "avg_bpm": sum(tempos) / len(tempos) if tempos else None,
+        "bpm_coverage": len(tempos) / len(tracks) if tracks else 0.0,
+        "bpm_sources": {
+            src: sum(1 for t in tracks.values() if (t.get("features") or {}).get("tempo")
+                     and (t["features"].get("source") or "reccobeats") == src)
+            for src in ("reccobeats", "deezer", "artist average")
+        },
         "playlists": len(library.get("playlists", [])),
         "liked": len(library.get("liked", [])),
         "tracks": len(tracks),

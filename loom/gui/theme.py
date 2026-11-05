@@ -34,6 +34,13 @@ QPushButton#nav:checked {{ background: {RAISED}; color: white; font-weight: 600;
 QLineEdit {{ background: {RAISED}; border: 1px solid {BORDER}; border-radius: 8px; padding: 8px 12px; selection-background-color: {ACCENT}; }}
 QLineEdit:focus {{ border-color: {ACCENT}; }}
 
+QComboBox, QSpinBox {{ background: {RAISED}; border: 1px solid {BORDER}; border-radius: 8px; padding: 6px 10px; min-height: 20px; }}
+QComboBox:hover, QSpinBox:hover {{ border-color: {ACCENT}; }}
+QComboBox::drop-down {{ border: none; width: 22px; }}
+QComboBox QAbstractItemView {{ background: {RAISED}; border: 1px solid {BORDER}; selection-background-color: {ACCENT}; outline: none; }}
+QSpinBox::up-button, QSpinBox::down-button {{ width: 16px; border: none; background: transparent; }}
+QListWidget::indicator {{ width: 16px; height: 16px; border-radius: 4px; border: 1px solid {MUTED}; background: transparent; }}
+QListWidget::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; image: none; }}
 QListWidget {{ background: transparent; border: none; outline: none; }}
 QListWidget::item {{ padding: 7px 10px; border-radius: 8px; }}
 QListWidget::item:hover {{ background: {RAISED}; }}
