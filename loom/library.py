@@ -32,6 +32,8 @@ def _track_record(track: dict[str, Any]) -> dict[str, Any]:
             "image": images[-1]["url"] if images else None,
         },
         "duration_ms": track.get("duration_ms") or 0,
+        "track_number": track.get("track_number"),
+        "disc_number": track.get("disc_number"),
         "explicit": bool(track.get("explicit")),
         "popularity": track.get("popularity"),
         "uri": track.get("uri"),

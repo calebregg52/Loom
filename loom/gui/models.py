@@ -28,10 +28,17 @@ class TrackTableModel(QAbstractTableModel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._rows: list[tuple[int, dict[str, Any], str, str, bool]] = []
+        self._notes: list[tuple[str, str]] = []  # per row: (tooltip, color for the # column)
+
+    def set_notes(self, notes: list[tuple[str, str]]) -> None:
+        self._notes = notes
+        if self._rows:
+            self.dataChanged.emit(self.index(0, 0), self.index(len(self._rows) - 1, len(COLUMNS) - 1))
 
     def set_rows(self, entries: list[dict[str, Any]], library: dict[str, Any]) -> None:
         tracks = library["tracks"]
         self.beginResetModel()
+        self._notes = []
         self._rows = [
             (i, tracks[e["id"]], (e.get("added_at") or "")[:10],
              ", ".join(track_genres(library, tracks[e["id"]])),
@@ -79,6 +86,11 @@ class TrackTableModel(QAbstractTableModel):
             if col in numeric:
                 return numeric[col] if numeric[col] is not None else -1
             return (self.data(index, Qt.DisplayRole) or "").lower()
+        note = self._notes[index.row()] if index.row() < len(self._notes) else None
+        if note and role == Qt.ToolTipRole and col in (0, 1, 2):
+            return note[0]
+        if note and role == Qt.ForegroundRole and col == 0:
+            return QColor(note[1])
         if role == Qt.ToolTipRole and col == 1:
             return f"{t['name']} · {t['album']['name']}"
         if role == Qt.ToolTipRole and col == 3 and genre:
