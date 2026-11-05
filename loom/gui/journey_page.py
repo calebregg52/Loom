@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import math
 import random
 from typing import Any
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -21,7 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import genres, journey, publish
+from .. import config, genres, journey, publish, wavefit
 from .models import TrackTableModel
 from .theme import ACCENT, BORDER, MUTED, TEXT
 
@@ -51,15 +52,23 @@ class CurveEditor(QWidget):
         self.setMinimumHeight(200)
         self.setMouseTracking(True)
         self.points: list[list[float]] = [[0.0, 0.85], [1.0, 0.05]]
-        self.low, self.high = 70.0, 150.0
-        self.bpms: list[float] = []
-        self.estimated: list[bool] = []
+        self.scale = _Linear(70.0, 150.0)
+        self.songs: list[dict[str, Any]] = []  # {x, bpm, est, color}
+        self.thin: list[tuple[float, float]] = []
         self.album: dict[str, Any] | None = None
         self._drag: int | None = None
         self._hover: int | None = None
         self.setToolTip("Drag the dots to reshape the journey. Double-click to add a dot, right-click one to remove it.")
 
     # ---- data in/out
+
+    @property
+    def low(self) -> float:
+        return self.scale.low
+
+    @property
+    def high(self) -> float:
+        return self.scale.high
 
     def set_points(self, points) -> None:
         self.points = [list(p) for p in journey.clean_points(points)]
@@ -68,46 +77,47 @@ class CurveEditor(QWidget):
     def get_points(self) -> list[tuple[float, float]]:
         return [(round(x, 3), round(y, 3)) for x, y in self.points]
 
+    def set_scale(self, scale) -> None:
+        self.scale = scale or _Linear(70.0, 150.0)
+        self.update()
+
     def set_range(self, low: float, high: float) -> None:
-        self.low, self.high = low, max(high, low + 1)
+        self.set_scale(_Linear(low, max(high, low + 1)))
+
+    def set_songs(self, songs, album, thin=()) -> None:
+        self.songs, self.album, self.thin = list(songs), album, list(thin)
         self.update()
 
-    def set_songs(self, bpms, estimated, album) -> None:
-        self.bpms, self.estimated, self.album = bpms, estimated, album
-        self.update()
-
-    # ---- geometry
+    # ---- geometry (vertical axis is wave height: 0 = slowest, 1 = fastest)
 
     def _plot(self) -> QRectF:
         return QRectF(self.PAD_L, self.PAD_T, self.width() - self.PAD_L - self.PAD_R,
                       self.height() - self.PAD_T - self.PAD_B)
 
     def _view(self) -> tuple[float, float]:
-        span = self.high - self.low
-        values = [self.low - span * 0.12, self.high + span * 0.12] + list(self.bpms)
+        ys = [-0.1, 1.1] + [self.scale.to_y(s["bpm"]) for s in self.songs]
         if self.album:
-            values.append(self.album["avg_bpm"])
-        return min(values), max(values)
+            ys.append(self.scale.to_y(self.album["avg_bpm"]))
+        return max(min(ys), -0.6), min(max(ys), 1.6)
 
-    def _to_screen(self, x: float, bpm: float) -> QPointF:
+    def _to_screen(self, x: float, y: float) -> QPointF:
         r = self._plot()
         lo, hi = self._view()
-        return QPointF(r.left() + x * r.width(), r.bottom() - (bpm - lo) / (hi - lo) * r.height())
+        return QPointF(r.left() + x * r.width(), r.bottom() - (y - lo) / (hi - lo) * r.height())
 
     def _norm_to_bpm(self, y: float) -> float:
-        return self.low + (self.high - self.low) * y
+        return self.scale.to_bpm(y)
 
     def _from_screen(self, pos) -> tuple[float, float]:
         r = self._plot()
         lo, hi = self._view()
         x = (pos.x() - r.left()) / r.width()
-        bpm = lo + (r.bottom() - pos.y()) / r.height() * (hi - lo)
-        y = (bpm - self.low) / (self.high - self.low)
+        y = lo + (r.bottom() - pos.y()) / r.height() * (hi - lo)
         return min(max(x, 0.0), 1.0), min(max(y, 0.0), 1.0)
 
     def _hit(self, pos) -> int | None:
         for i, (x, y) in enumerate(self.points):
-            q = self._to_screen(x, self._norm_to_bpm(y))
+            q = self._to_screen(x, y)
             if (q.x() - pos.x()) ** 2 + (q.y() - pos.y()) ** 2 <= 81:
                 return i
         return None
@@ -167,13 +177,31 @@ class CurveEditor(QWidget):
         small.setPointSizeF(max(7.5, small.pointSizeF() - 1.5))
         p.setFont(small)
 
-        for frac in (0, 0.25, 0.5, 0.75, 1):
-            bpm = lo + (hi - lo) * frac
-            y = r.bottom() - frac * r.height()
+        # stretches where your library has too few songs to follow the wave
+        widest = max(self.thin, key=lambda s: s[1] - s[0]) if self.thin else None
+        for x0, x1 in self.thin:
+            a, b = self._to_screen(x0, hi), self._to_screen(x1, lo)
+            p.fillRect(QRectF(a, b), QColor(251, 191, 36, 26))
+            if (x0, x1) == widest:
+                p.setPen(QColor("#d6a234"))
+                p.drawText(QRectF(a.x() + 4, a.y() + 2, max(b.x() - a.x(), 90), 16), Qt.AlignLeft,
+                           "few songs here")
+
+        # BPM gridlines: evenly spaced in BPM, so where the scale bends they bunch up or spread out
+        b_lo, b_hi = self.scale.to_bpm(lo), self.scale.to_bpm(hi)
+        step = next(s for s in (5, 10, 20, 25, 40, 50) if (b_hi - b_lo) / s <= 7)
+        last_y = None
+        bpm = math.ceil(b_lo / step) * step
+        while bpm <= b_hi:
+            y = self._to_screen(0, self.scale.to_y(bpm)).y()
             p.setPen(QPen(QColor(BORDER), 1))
             p.drawLine(QPointF(r.left(), y), QPointF(r.right(), y))
-            p.setPen(QColor(MUTED))
-            p.drawText(QRectF(0, y - 8, self.PAD_L - 8, 16), Qt.AlignRight | Qt.AlignVCenter, f"{bpm:.0f}")
+            if last_y is None or abs(last_y - y) >= 14:
+                p.setPen(QColor(MUTED))
+                p.drawText(QRectF(0, y - 8, self.PAD_L - 8, 16), Qt.AlignRight | Qt.AlignVCenter, f"{bpm:.0f}")
+                last_y = y
+            bpm += step
+        p.setPen(QColor(MUTED))
         p.drawText(QRectF(r.left(), r.bottom() + 6, 80, 16), Qt.AlignLeft, "start")
         p.drawText(QRectF(r.right() - 80, r.bottom() + 6, 80, 16), Qt.AlignRight, "end")
         p.drawText(QRectF(r.left(), 2, r.width(), 16), Qt.AlignRight,
@@ -183,28 +211,27 @@ class CurveEditor(QWidget):
         path = QPainterPath()
         for k in range(121):
             x = k / 120
-            q = self._to_screen(x, self._norm_to_bpm(journey.curve_at(self.points, x)))
+            q = self._to_screen(x, journey.curve_at(self.points, x))
             path.moveTo(q) if k == 0 else path.lineTo(q)
         p.setPen(QPen(QColor(MUTED), 1.6, Qt.DashLine))
         p.setBrush(Qt.NoBrush)
         p.drawPath(path)
 
-        # songs
-        if self.bpms:
-            n = len(self.bpms)
-            line = [self._to_screen(i / max(n - 1, 1), b) for i, b in enumerate(self.bpms)]
-            p.setPen(QPen(QColor(ACCENT), 2.2))
+        # songs, placed by play time, colored by how well each one sits on the wave
+        if self.songs:
+            line = [self._to_screen(s["x"], self.scale.to_y(s["bpm"])) for s in self.songs]
+            p.setPen(QPen(QColor(ACCENT), 2.0))
             path = QPainterPath(line[0])
             for q in line[1:]:
                 path.lineTo(q)
             p.drawPath(path)
-            for i, q in enumerate(line):
-                est = i < len(self.estimated) and self.estimated[i]
-                p.setPen(QPen(QColor(ACCENT), 1.4))
-                p.setBrush(QColor("#151821") if est else QColor(ACCENT))
-                p.drawEllipse(q, 3.2, 3.2)
+            for s, q in zip(self.songs, line):
+                color = QColor(s.get("color") or ACCENT)
+                p.setPen(QPen(color, 1.6))
+                p.setBrush(QColor("#151821") if s.get("est") else color)
+                p.drawEllipse(q, 3.6, 3.6)
             if self.album:
-                q = self._to_screen(1.0, self.album["avg_bpm"])
+                q = self._to_screen(1.0, self.scale.to_y(self.album["avg_bpm"]))
                 a = QPointF(r.right() + 34, q.y())
                 p.setPen(QPen(QColor(ACCENT), 1.4, Qt.DotLine))
                 p.drawLine(line[-1], a)
@@ -215,7 +242,7 @@ class CurveEditor(QWidget):
 
         # handles
         for i, (x, y) in enumerate(self.points):
-            q = self._to_screen(x, self._norm_to_bpm(y))
+            q = self._to_screen(x, y)
             active = i in (self._hover, self._drag)
             p.setPen(QPen(QColor(TEXT), 1.6))
             p.setBrush(QColor(TEXT) if active else QColor("#151821"))
@@ -224,6 +251,26 @@ class CurveEditor(QWidget):
                 p.setPen(QColor(TEXT))
                 p.drawText(QRectF(q.x() - 40, q.y() - 26, 80, 16), Qt.AlignCenter,
                            f"{self._norm_to_bpm(y):.0f} BPM")
+
+
+class _Linear:
+    """A plain straight BPM scale, used before there is a library to fit."""
+
+    def __init__(self, low: float, high: float):
+        self.low, self.high = low, high
+
+    def to_bpm(self, y: float) -> float:
+        return self.low + (self.high - self.low) * y
+
+    def to_y(self, bpm: float) -> float:
+        return (bpm - self.low) / (self.high - self.low)
+
+
+GOOD, OK, OFF = "#4ade80", "#fbbf24", "#f87171"
+
+
+def fit_color(off_pct: float) -> str:
+    return GOOD if off_pct < 5 else OK if off_pct < 12 else OFF
 
 
 class JourneyPage(QWidget):
@@ -255,7 +302,15 @@ class JourneyPage(QWidget):
         self.length.setSuffix(" songs")
         self.album = QCheckBox("End with a full album")
         self.album.setChecked(True)
-        for text, w in (("From", self.source), ("Genre", self.family), ("Shape", self.shape)):
+        self.priority = QComboBox()
+        for key, label in wavefit.PRIORITY_LABELS.items():
+            self.priority.addItem(label, key)
+        self.priority.setCurrentIndex(max(self.priority.findData(config.load_ui("journey_priority", "balanced")), 0))
+        self.priority.setToolTip("Tight to the wave: follow the line closely.\n"
+                                 "Balanced: a mix of both.\n"
+                                 "Smooth flow: never jolt between songs, even if the line is followed loosely.")
+        for text, w in (("From", self.source), ("Genre", self.family), ("Shape", self.shape),
+                        ("Priority", self.priority)):
             row.addWidget(_label(text, "muted"))
             row.addWidget(w)
         row.addWidget(self.length)
@@ -291,6 +346,8 @@ class JourneyPage(QWidget):
         lay.addSpacing(8)
 
         self.summary = _label("", "pageSubtitle", wrap=True)
+        self.summary.setTextFormat(Qt.RichText)
+        self.summary.setToolTip("Fit: how closely the songs follow your wave (60%) and how smoothly each one hands off to the next (40%).\nHover a song for why it was picked.")
         lay.addWidget(self.summary)
         self.model = TrackTableModel(self)
         self.table = QTableView()
@@ -343,6 +400,11 @@ class JourneyPage(QWidget):
         self.source.currentIndexChanged.connect(self._update_range)
         self.save_btn.clicked.connect(self._save)
         self.save_btn.setEnabled(False)
+        self.priority.currentIndexChanged.connect(self._priority_picked)
+        self._live = QTimer(self)  # wait for a pause in editing before re-planning
+        self._live.setSingleShot(True)
+        self._live.setInterval(200)
+        self._live.timeout.connect(lambda: self.rebuild(seed=None))
         self.again_btn.setEnabled(False)
 
     # ---- shapes
@@ -395,6 +457,11 @@ class JourneyPage(QWidget):
     def _on_curve_edited(self) -> None:
         self._mark_custom()
         if self.data:
+            self._live.start()
+
+    def _priority_picked(self) -> None:
+        config.save_ui("journey_priority", self.priority.currentData())
+        if self.result is not None:
             self.rebuild(seed=None)
 
     def _transform(self, fn) -> None:
@@ -435,9 +502,9 @@ class JourneyPage(QWidget):
 
     def _update_range(self) -> None:
         if self.data:
-            rng = journey.bpm_range(self.data, self._entries(), self.family.currentData())
-            if rng:
-                self.chart.set_range(*rng)
+            scale = wavefit.scale_for(self.data, self._entries(), self.family.currentData())
+            if scale:
+                self.chart.set_scale(scale)
         self._update_note()
 
     def set_library(self, data: dict[str, Any] | None) -> None:
@@ -472,17 +539,33 @@ class JourneyPage(QWidget):
     def rebuild(self, seed: int | None) -> None:
         if not self.data:
             return
-        self.result = j = journey.build(
-            self.data, self._entries(), self.chart.get_points(), self.length.value(),
-            genre_family=self.family.currentData(), end_with_album=self.album.isChecked(), seed=seed,
-        )
+        from PySide6.QtWidgets import QApplication
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            self.result = j = journey.build(
+                self.data, self._entries(), self.chart.get_points(), self.length.value(),
+                genre_family=self.family.currentData(), end_with_album=self.album.isChecked(), seed=seed,
+                priority=self.priority.currentData() or "balanced",
+            )
+        finally:
+            QApplication.restoreOverrideCursor()
         tracks = self.data["tracks"]
         chain = [tracks[t] for t in j["track_ids"]]
-        if j.get("low") is not None:
-            self.chart.set_range(j["low"], j["high"])
-        self.chart.set_songs([journey.tempo(t) for t in chain],
-                             [bool((t.get("features") or {}).get("estimated")) for t in chain], j["album"])
+        if j.get("scale") is not None:
+            self.chart.set_scale(j["scale"])
+        songs, notes = [], []
+        for i, (t, d) in enumerate(zip(chain, j["details"])):
+            bpm = journey.tempo(t)
+            if d["folded"]:  # drawn where it grooves: at half or double time
+                bpm = min((bpm * 2, bpm / 2), key=lambda b: abs(b - d["target_bpm"]))
+            color = fit_color(d["off_pct"])
+            songs.append({"x": j["xs"][i], "bpm": bpm, "color": color,
+                          "est": bool((t.get("features") or {}).get("estimated"))})
+            notes.append((wavefit.why(d, chain[i - 1]["name"] if i else None), color))
+        self.chart.set_songs(songs, j["album"], j.get("thin", []))
         self.model.set_rows([{"id": t} for t in j["track_ids"]], self.data)
+        self.model.set_notes(notes)
+        self._update_note()
         self.again_btn.setEnabled(bool(chain))
         self.save_btn.setEnabled(bool(chain))
         if not chain:
@@ -491,9 +574,17 @@ class JourneyPage(QWidget):
             return
         ms = sum(t["duration_ms"] for t in chain)
         first, last = journey.tempo(chain[0]), journey.tempo(chain[-1])
+        extra = []
+        if j.get("short_pool"):
+            extra.append(f"only {len(chain)} songs fit here, so it's shorter than you asked")
+        if j.get("thin"):
+            extra.append("the shaded parts of the wave have few songs in your library")
+        if j["skipped"]:
+            extra.append(f"{j['skipped']:,} songs left out because they have no BPM")
         self.summary.setText(
+            f"<b style='color:{TEXT}'>Fit {j['fit_score']}/100</b> &nbsp;·&nbsp; "
             f"{len(chain)} songs · {ms // 60000} min · {first:.0f} → {last:.0f} BPM"
-            + (f" · {j['skipped']:,} songs left out because they have no BPM" if j["skipped"] else "")
+            + "".join(f" · {e}" for e in extra)
         )
         if j["album"]:
             a = j["album"]

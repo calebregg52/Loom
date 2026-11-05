@@ -71,6 +71,20 @@ drag a dot to move it, double-click empty space to add a point, right-click a do
 The journey rebuilds as you edit. **Flip** reverses the wave, **Invert** turns it upside down, and
 **Save shape…** keeps it in the Shape menu (marked ★) for next time.
 
+### How songs are picked
+
+Loom plans the whole journey at once rather than one song at a time. It scores every candidate
+journey on how closely it follows your wave, how smoothly energy, key and genre change from song
+to song, and how varied the artists are. It then searches for the lowest score, using a beam
+search followed by a repair pass that swaps weak songs out. Songs sit on the wave by play time,
+and the closing album is chosen first so the journey can land on it.
+
+- **Priority**: *Tight to the wave*, *Balanced* or *Smooth flow*.
+- **Fit score** (0–100): how close the songs are to the wave (60%) and how smooth the hand-offs are (40%).
+- **Dot colors**: green means on the wave, amber means a little off, red means well off. Hover a song for why it was picked.
+- **Shaded stretches**: your library has few songs at those tempos.
+
+`python tools/bench_journeys.py` compares the planner with the old greedy picker.
 
 ## Quick sort
 

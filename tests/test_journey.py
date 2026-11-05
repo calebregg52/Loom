@@ -144,3 +144,84 @@ def test_energy_moves_smoothly_between_songs():
         jumps = [abs(a - b) for a, b in zip(e, e[1:])]
         assert max(jumps) < 0.35, (shape, max(jumps))
         assert sum(jumps) / len(jumps) < 0.15
+
+
+# ---------------------------------------------------------------- wave-fit planner
+
+from loom import wavefit  # noqa: E402
+
+
+def _off(lib, j):
+    return sum(d["off_pct"] for d in j["details"]) / len(j["details"])
+
+
+def test_planner_beats_greedy_on_the_same_waves():
+    lib = make_library(600, seed=5)
+    pool = [t for t in lib["tracks"].values() if journey.tempo(t)]
+    wins = 0
+    for shape in ("rollercoaster", "intervals", "arc", "drop"):
+        pts = journey.shape_points(shape)
+        ref = wavefit.Planner(lib, pool, pts, 25)
+        g = journey.build_greedy(lib, lib["liked"], shape, 25, end_with_album=False)
+        w = journey.build(lib, lib["liked"], shape, 25, end_with_album=False)
+        by_id = {s.id: s for s in ref.songs}
+        gs = ref.score([by_id[t] for t in g["track_ids"]])
+        ws = ref.score([by_id[t] for t in w["track_ids"]])
+        wins += ws < gs
+        assert len(w["track_ids"]) == 25 and len(set(w["track_ids"])) == 25
+        assert _off(lib, w) < 6
+    assert wins == 4
+
+
+def test_scale_bends_toward_the_library_and_round_trips():
+    bpms = [90 + i % 10 for i in range(150)] + [100 + i * 1.2 for i in range(50)]
+    sc = wavefit.Scale(bpms)
+    ys = [k / 20 for k in range(21)]
+    vals = [sc.to_bpm(y) for y in ys]
+    assert vals == sorted(vals)
+    assert all(abs(sc.to_y(sc.to_bpm(y)) - y) < 1e-6 for y in ys)
+    # most songs sit at 90-99, so the middle of the wave lands lower than a straight line would put it
+    assert sc.to_bpm(0.5) < (sc.low + sc.high) / 2
+
+
+def test_songs_sit_on_the_wave_by_play_time():
+    lib = make_library()
+    j = journey.build(lib, lib["liked"], "build_up", 12, end_with_album=False)
+    xs = j["xs"]
+    assert xs[0] == 0 and abs(xs[-1] - 1) < 1e-9 and xs == sorted(xs)
+    durs = [lib["tracks"][t]["duration_ms"] for t in j["track_ids"]]
+    assert len(set(durs)) == 1 and all(abs((b - a) - 1 / 11) < 1e-9 for a, b in zip(xs, xs[1:]))
+
+
+def test_start_song_is_kept_and_album_is_planned_first():
+    lib = make_library(400, seed=2)
+    start = next(t for t in lib["tracks"].values() if journey.tempo(t))["id"]
+    j = journey.build(lib, lib["liked"], "wind_down", 20, start_id=start, seed=3)
+    assert j["track_ids"][0] == start
+    assert j["album"] and not set(j["album"]["known_track_ids"]) & set(j["track_ids"][1:])
+
+
+def test_priorities_trade_wave_for_flow():
+    lib = make_library(600, seed=8)
+    tight = journey.build(lib, lib["liked"], "intervals", 25, end_with_album=False, priority="tight")
+    smooth = journey.build(lib, lib["liked"], "intervals", 25, end_with_album=False, priority="smooth")
+    assert _off(lib, tight) <= _off(lib, smooth)
+    ej = lambda j: max(d["energy_step"] or 0 for d in j["details"][1:])  # noqa: E731
+    assert ej(smooth) <= ej(tight) + 0.02
+
+
+def test_thin_spots_fit_score_and_reasons():
+    lib = make_library(120, seed=4)
+    for t in lib["tracks"].values():  # nothing above 120 BPM
+        if t["features"]:
+            t["features"]["tempo"] = 70 + (hash(t["id"]) % 50)
+    j = journey.build(lib, lib["liked"], [(0, 0.5), (0.5, 3), (1, 0.5)], 15, end_with_album=False)
+    assert 0 <= j["fit_score"] <= 100
+    tip = wavefit.why(j["details"][1], "Song 1")
+    assert "BPM here" in tip and "Key:" in tip
+    sc = j["scale"]
+    j2 = wavefit.Planner(lib, [t for t in lib["tracks"].values() if journey.tempo(t)],
+                         [(0, 0.5), (0.5, 1.0), (1, 0.5)], 15)
+    j2.scale = wavefit.Scale([60, 200] * 3)  # pretend the wave asks for 200 BPM in the middle
+    j2._tables()
+    assert j2.thin_spots(), sc
