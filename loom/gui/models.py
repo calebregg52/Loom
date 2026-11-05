@@ -17,17 +17,25 @@ def fmt_duration(ms: int) -> str:
     return f"{seconds // 60}:{seconds % 60:02d}"
 
 
+def _genre_estimated(library: dict[str, Any], track: dict[str, Any]) -> bool:
+    artists = library.get("artists", {})
+    sources = [(artists.get(a.get("id")) or {}).get("genre_source") for a in track["artists"]]
+    real = [s for s in sources if s and s != "estimated"]
+    return bool(sources) and not real and "estimated" in sources
+
+
 class TrackTableModel(QAbstractTableModel):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._rows: list[tuple[int, dict[str, Any], str, str]] = []
+        self._rows: list[tuple[int, dict[str, Any], str, str, bool]] = []
 
     def set_rows(self, entries: list[dict[str, Any]], library: dict[str, Any]) -> None:
         tracks = library["tracks"]
         self.beginResetModel()
         self._rows = [
             (i, tracks[e["id"]], (e.get("added_at") or "")[:10],
-             ", ".join(track_genres(library, tracks[e["id"]])))
+             ", ".join(track_genres(library, tracks[e["id"]])),
+             _genre_estimated(library, tracks[e["id"]]))
             for i, e in enumerate(entries, start=1)
             if e["id"] in tracks
         ]
@@ -47,7 +55,7 @@ class TrackTableModel(QAbstractTableModel):
     def data(self, index, role=Qt.DisplayRole):
         if not index.isValid():
             return None
-        n, t, added, genre = self._rows[index.row()]
+        n, t, added, genre, genre_guess = self._rows[index.row()]
         f = t.get("features") or {}
         col = index.column()
         if role == Qt.DisplayRole:
@@ -55,8 +63,8 @@ class TrackTableModel(QAbstractTableModel):
                 str(n),
                 t["name"],
                 ", ".join(a["name"] for a in t["artists"]),
-                genre.split(", ")[0],
-                f"{f['tempo']:.0f}" if f.get("tempo") else "",
+                ("~" if genre_guess and genre else "") + genre.split(", ")[0],
+                (("~" if f.get("estimated") else "") + f"{f['tempo']:.0f}") if f.get("tempo") else "",
                 f"{f['energy'] * 100:.0f}" if f.get("energy") is not None else "",
                 key_label(f),
                 t["album"]["release_date"][:4],
@@ -75,6 +83,13 @@ class TrackTableModel(QAbstractTableModel):
         if role == Qt.ToolTipRole and col == 5 and f:
             return (f"Energy {f.get('energy', 0):.2f} · Danceability {f.get('danceability', 0):.2f} · "
                     f"Mood (valence) {f.get('valence', 0):.2f} · Acoustic {f.get('acousticness', 0):.2f}")
+        if role == Qt.ToolTipRole and col == 4 and f.get("tempo"):
+            return {"reccobeats": "BPM from ReccoBeats", "deezer": "BPM from Deezer",
+                    "artist average": "Estimate: average BPM of this artist's other songs"}.get(f.get("source"), "")
+        if role == Qt.ToolTipRole and col == 3 and genre_guess:
+            return f"Estimate from your playlists: {genre}"
+        if role == Qt.ForegroundRole and col == 4 and f.get("estimated"):
+            return QColor(MUTED)
         if role == Qt.ForegroundRole and col in (0, 3, 6, 7, 8, 9):
             return QColor(MUTED)
         if role == Qt.TextAlignmentRole and col in (0, 4, 5, 7, 8):

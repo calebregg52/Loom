@@ -23,6 +23,12 @@ class FakeSession:
                  "energy": 0.8, "key": 9, "mode": 0, "valence": 0.3}
                 for n, i in enumerate(ids) if not i.startswith("U")  # "U..." songs are unknown
             ]})
+        if url.startswith(enrich.DEEZER_URL):
+            if "/isrc:" in url:
+                return Resp({"id": 77, "bpm": 141.0} if url.endswith("GOOD") else {"id": 78, "bpm": 0})
+            if url.endswith("/search"):
+                return Resp({"data": [{"id": 79}]})
+            return Resp({"id": 79, "bpm": 99.0 if url.endswith("/79") else 0})
         tags = {"Artist B": [{"name": "Shoegaze", "count": 100}, {"name": "seen live", "count": 90},
                              {"name": "2010s", "count": 50}, {"name": "dream pop", "count": 40},
                              {"name": "rare", "count": 2}]}
@@ -57,7 +63,7 @@ def test_enrich_and_cache(tmp_path):
 
     a, b, u = lib["tracks"][sid("a")], lib["tracks"][sid("b")], lib["tracks"][sid("U")]
     assert round(a["features"]["tempo"]) == 120 and b["features"]["energy"] == 0.8
-    assert u["features"] is None
+    assert u["features"] == {"tempo": 99.0, "source": "deezer"}  # ReccoBeats missed it, Deezer search found it
     assert enrich.key_label(a["features"]) == "A minor"
     assert lib["artists"]["A"] == {"name": "Artist A", "genres": ["indie rock"], "genre_source": "spotify"}
     assert lib["artists"]["B"]["genres"] == ["shoegaze", "dream pop"]
@@ -66,7 +72,7 @@ def test_enrich_and_cache(tmp_path):
 
     s = library.summary(lib)
     assert s["genres"] == 3 and s["top_genres"][0] == ("dream pop", 2)
-    assert abs(s["bpm_coverage"] - 2 / 3) < 1e-9
+    assert s["bpm_coverage"] == 1.0
 
     # Second run uses the cache: no new Spotify or HTTP calls.
     before = len(session.calls)
@@ -132,7 +138,8 @@ def test_empty_results_are_retried_later(tmp_path, monkeypatch):
     assert asked() == 2
 
 
-def test_stops_asking_spotify_when_it_has_no_genres(tmp_path):
+def test_stops_asking_spotify_when_it_has_no_genres(tmp_path, monkeypatch):
+    monkeypatch.setattr(enrich.time, "sleep", lambda s: None)
     class Empty(FakeSpotify):
         def artists(self, ids):
             self.calls += 1
@@ -235,3 +242,34 @@ def test_no_single_lookups_when_lastfm_is_set(tmp_path):
     enrich.enrich(lib, NoBulk(), tmp_path / "c.json", lastfm_key="k", session=FakeSession())
     assert NoBulk.singles == 0
     assert lib["artists"]["B"]["genres"] == ["shoegaze", "dream pop"]  # Last.fm filled in
+
+
+def test_deezer_by_isrc(tmp_path, monkeypatch):
+    monkeypatch.setattr(enrich.time, "sleep", lambda s: None)
+    lib = make_library()
+    lib["tracks"][sid("U")]["isrc"] = "GOOD"
+    enrich.enrich(lib, FakeSpotify(), tmp_path / "c.json", session=FakeSession())
+    assert lib["tracks"][sid("U")]["features"] == {"tempo": 141.0, "source": "deezer"}
+
+
+def test_estimates_are_marked():
+    def t(tid, artist, tempo=None):
+        return {"id": tid, "name": tid, "artists": [{"id": artist, "name": artist}],
+                "features": {"tempo": tempo} if tempo else None}
+    lib = {
+        "tracks": {"1": t("1", "hardy", 100), "2": t("2", "hardy", 120), "3": t("3", "hardy"),
+                   "4": t("4", "newguy"), "5": t("5", "loner"), "6": t("6", "rapper"), "7": t("7", "mystery")},
+        "artists": {"hardy": {"name": "HARDY", "genres": ["country"], "genre_source": "lastfm"},
+                    "newguy": {"name": "New Guy", "genres": [], "genre_source": None},
+                    "loner": {"name": "Loner", "genres": [], "genre_source": None},
+                    "rapper": {"name": "Rapper", "genres": ["hip hop"], "genre_source": "lastfm"},
+                    "mystery": {"name": "Mystery", "genres": [], "genre_source": None}},
+        "playlists": [{"name": "Slow Country", "tracks": [{"id": "4"}, {"id": "1"}]},
+                      {"name": "Hype Mix", "tracks": [{"id": "5"}, {"id": "6"}]}],
+    }
+    enrich.estimate_missing(lib)
+    assert lib["tracks"]["3"]["features"] == {"tempo": 110, "estimated": True, "source": "artist average"}
+    assert lib["tracks"]["4"]["features"] is None  # one-song artist with no BPM: no guess
+    assert lib["artists"]["newguy"] == {"name": "New Guy", "genres": ["country"], "genre_source": "estimated"}
+    assert lib["artists"]["loner"]["genres"] == ["hip hop"]  # from the artist they share "Hype Mix" with
+    assert lib["artists"]["mystery"]["genre_source"] is None  # in no playlists: stays blank

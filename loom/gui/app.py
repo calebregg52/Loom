@@ -352,8 +352,13 @@ class OverviewPage(QWidget):
         if skipped:
             notes.append(f"Spotify didn't let Loom read {len(skipped)} playlist(s): {', '.join(skipped)}.")
         if data.get("enriched_at"):
-            notes.append(f"BPM found for {s['bpm_coverage']:.0%} of songs. Songs without it are checked again "
-                         "on later syncs.")
+            src, total = s["bpm_sources"], max(s["tracks"], 1)
+            missing = s["tracks"] - sum(src.values())
+            notes.append(
+                f"BPM: {src['reccobeats'] / total:.0%} from ReccoBeats, {src['deezer'] / total:.0%} from Deezer, "
+                f"{src['artist average'] / total:.0%} estimated from the artist's other songs (shown as ~), "
+                f"{missing / total:.0%} unknown. Unknown songs are checked again on later syncs."
+            )
         self.note.setText("\n".join(notes))
 
     def _show_sources(self, data: dict[str, Any]) -> None:
@@ -362,11 +367,12 @@ class OverviewPage(QWidget):
             self.sources_card.hide()
             return
         self.sources_card.show()
-        counts = {"spotify": 0, "lastfm": 0, None: 0}
+        counts = {"spotify": 0, "lastfm": 0, "estimated": 0, None: 0}
         for a in artists.values():
             counts[a.get("genre_source")] = counts.get(a.get("genre_source"), 0) + 1
         self.sources_line.setText(
             f"Spotify: {_n(counts['spotify'], 'artist')}   ·   Last.fm: {_n(counts['lastfm'], 'artist')}   ·   "
+            f"Estimated from your playlists (~): {_n(counts['estimated'], 'artist')}   ·   "
             f"No genre: {_n(counts[None], 'artist')}"
         )
         ok, bad = "<span style='color:#4ade80'>●</span>", "<span style='color:#f87171'>●</span>"

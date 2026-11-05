@@ -35,6 +35,7 @@ def _track_record(track: dict[str, Any]) -> dict[str, Any]:
         "explicit": bool(track.get("explicit")),
         "popularity": track.get("popularity"),
         "uri": track.get("uri"),
+        "isrc": (track.get("external_ids") or {}).get("isrc"),
     }
 
 
@@ -160,6 +161,11 @@ def summary(library: dict[str, Any]) -> dict[str, Any]:
         "genres": len(genre_counts),
         "avg_bpm": sum(tempos) / len(tempos) if tempos else None,
         "bpm_coverage": len(tempos) / len(tracks) if tracks else 0.0,
+        "bpm_sources": {
+            src: sum(1 for t in tracks.values() if (t.get("features") or {}).get("tempo")
+                     and (t["features"].get("source") or "reccobeats") == src)
+            for src in ("reccobeats", "deezer", "artist average")
+        },
         "playlists": len(library.get("playlists", [])),
         "liked": len(library.get("liked", [])),
         "tracks": len(tracks),

@@ -13,7 +13,7 @@ FAMILIES: list[tuple[str, tuple[str, ...]]] = [
     ("R&B & Soul", ("r&b", "rnb", "soul", "funk", "motown", "new jack swing")),
     ("Jazz", ("jazz", "bebop", "swing", "bossa nova")),
     ("Blues", ("blues",)),
-    ("Country", ("country", "americana", "bluegrass", "red dirt", "outlaw", "honky", "texas", "nashville")),
+    ("Country", ("country", "americana", "bluegrass", "red dirt", "outlaw", "honky", "texas", "nashville", "redneck")),
     ("Folk", ("folk", "singer-songwriter", "acoustic")),
     ("Reggae", ("reggae", "dancehall", "ska", "dub ")),
     ("Latin", ("latin", "reggaeton", "salsa", "cumbia", "bachata", "corrido", "mexican", "banda",

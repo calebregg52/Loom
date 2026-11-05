@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -23,6 +24,7 @@ from .spotify import Cancelled
 
 RECCOBEATS_URL = "https://api.reccobeats.com/v1/audio-features"
 LASTFM_URL = "https://ws.audioscrobbler.com/2.0/"
+DEEZER_URL = "https://api.deezer.com"
 FEATURE_KEYS = (
     "tempo", "energy", "danceability", "valence", "acousticness",
     "instrumentalness", "speechiness", "liveness", "loudness", "key", "mode",
@@ -64,6 +66,7 @@ def load_cache(path: Path) -> dict[str, Any]:
     data.setdefault("features", {})   # track id -> features dict, or None when not found
     data.setdefault("spotify_genres", {})  # artist id -> list
     data.setdefault("lastfm_tags", {})  # artist name (lowercase) -> list
+    data.setdefault("deezer", {})  # track id -> {"tempo": ...} or None
     data.setdefault("empty_since", {})  # "kind:id" -> when a lookup found nothing
     return data
 
@@ -232,6 +235,40 @@ def fetch_audio_features(
     return out
 
 
+def fetch_deezer_bpm(
+    session: requests.Session, tracks: list[dict[str, Any]], progress: Progress = _noop,
+    out: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """BPM from Deezer's free API: find the song by ISRC (or by artist + title), then read its bpm.
+    Deezer reports 0 when it doesn't know, which we store as a miss."""
+    out = {} if out is None else out
+    for i, t in enumerate(tracks, start=1):
+        deezer_id = None
+        if t.get("isrc"):
+            data = _get(session, f"{DEEZER_URL}/track/isrc:{t['isrc']}", {})
+            if data and not data.get("error"):
+                if data.get("bpm"):
+                    out[t["id"]] = {"tempo": float(data["bpm"])}
+                    progress("Filling in BPM from Deezer", i, len(tracks))
+                    time.sleep(0.1)
+                    continue
+                deezer_id = data.get("id")
+        if deezer_id is None and t.get("artists"):
+            artist = t["artists"][0]["name"].replace('"', "")
+            title = re.sub(r"\s*[(\[-].*$", "", t["name"]).replace('"', "") or t["name"]
+            found = _get(session, f"{DEEZER_URL}/search", {"q": f'artist:"{artist}" track:"{title}"', "limit": 1})
+            hits = (found or {}).get("data") or []
+            deezer_id = hits[0].get("id") if hits else None
+        bpm = None
+        if deezer_id:
+            data = _get(session, f"{DEEZER_URL}/track/{deezer_id}", {})
+            bpm = (data or {}).get("bpm") or None
+        out[t["id"]] = {"tempo": float(bpm)} if bpm else None
+        progress("Filling in BPM from Deezer", i, len(tracks))
+        time.sleep(0.1)  # Deezer allows about 50 requests per 5 seconds
+    return out
+
+
 class LastfmError(Exception):
     pass
 
@@ -368,6 +405,23 @@ def enrich(
         _store(cache, "features", got, now)
         save_cache(cache, cache_path)
 
+    no_bpm = [
+        tracks[tid] for tid in tracks
+        if not (cache["features"].get(tid) or {}).get("tempo") and _needs_lookup(cache, "deezer", tid, now)
+    ]
+    if no_bpm:
+        bpm: dict[str, Any] = {}
+        try:
+            fetch_deezer_bpm(session, no_bpm, progress, bpm)
+        except Cancelled:
+            _store(cache, "deezer", bpm, now)
+            save_cache(cache, cache_path)
+            raise
+        except Exception as exc:
+            problems.append(f"Couldn't reach Deezer for extra BPM data ({_describe(exc)}).")
+        _store(cache, "deezer", bpm, now)
+        save_cache(cache, cache_path)
+
     if lastfm_key:
         need = sorted({
             name for aid, name in artists.items()
@@ -399,7 +453,13 @@ def enrich(
             "genre_source": "spotify" if spotify else ("lastfm" if lastfm else None),
         }
     for tid, t in tracks.items():
-        t["features"] = cache["features"].get(tid)
+        features = cache["features"].get(tid)
+        if features and features.get("tempo"):
+            features = {**features, "source": "reccobeats"}
+        elif (cache["deezer"].get(tid) or {}).get("tempo"):
+            features = {**(features or {}), "tempo": cache["deezer"][tid]["tempo"], "source": "deezer"}
+        t["features"] = features or None
+    estimate_missing(library)
     library["enriched_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     library["enrich_problems"] = problems
     library["lastfm_used"] = bool(lastfm_key)
@@ -411,6 +471,57 @@ def _describe(exc: Exception) -> str:
     if isinstance(exc, SpotifyException):
         return f"HTTP {exc.http_status}: {exc.msg}".strip()
     return f"{type(exc).__name__}: {exc}"
+
+
+def estimate_missing(library: dict[str, Any]) -> None:
+    """Crude guesses for what no source had, marked so the app can show them as estimates:
+    * BPM: the average of the same artist's songs that do have a BPM (needs at least 2)
+    * genre: from the names of the playlists the artist is in ("Slow Country" -> country), or else
+      the most common genre among artists they share playlists with
+    """
+    from .genres import family_of  # local import: genres.py is GUI-free but keeps this module light
+
+    tracks, artists = library["tracks"], library.get("artists", {})
+
+    # BPM by artist
+    tempos: dict[str, list[float]] = {}
+    for t in tracks.values():
+        f = t.get("features") or {}
+        if f.get("tempo") and not f.get("estimated") and t["artists"]:
+            tempos.setdefault(t["artists"][0].get("id"), []).append(f["tempo"])
+    for t in tracks.values():
+        f = t.get("features") or {}
+        if f.get("tempo") or not t["artists"]:
+            continue
+        known = tempos.get(t["artists"][0].get("id")) or []
+        if len(known) >= 2:
+            t["features"] = {**f, "tempo": sum(known) / len(known), "estimated": True, "source": "artist average"}
+
+    # Genres from playlists
+    missing = {aid for aid, a in artists.items() if not a.get("genres")}
+    if not missing:
+        return
+    in_playlists: dict[str, list[dict[str, Any]]] = {}
+    for p in library.get("playlists", []):
+        ids = {a.get("id") for e in p["tracks"] if e["id"] in tracks for a in tracks[e["id"]]["artists"]}
+        for aid in ids:
+            in_playlists.setdefault(aid, []).append({"name": p["name"], "artists": ids})
+    for aid in missing:
+        lists = in_playlists.get(aid) or []
+        by_name = Counter(f for f in (family_of(p["name"]) for p in lists) if f)
+        guess: list[str] = []
+        if by_name:
+            guess = [by_name.most_common(1)[0][0].lower()]
+        else:
+            near = Counter(
+                g for p in lists for other in p["artists"] if other != aid
+                for g in (artists.get(other) or {}).get("genres", [])[:2]
+                if (artists.get(other) or {}).get("genre_source") != "estimated"
+            )
+            if near:
+                guess = [near.most_common(1)[0][0]]
+        if guess:
+            artists[aid].update(genres=guess, genre_source="estimated")
 
 
 def track_genres(library: dict[str, Any], track: dict[str, Any]) -> list[str]:

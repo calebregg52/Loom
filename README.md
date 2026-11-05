@@ -37,6 +37,11 @@ Each sync also adds genres and audio features to your songs:
 - **BPM, energy, mood, danceability and key** come from [ReccoBeats](https://reccobeats.com), a free API
   that looks songs up by Spotify ID (Spotify no longer gives this data to new apps). Songs it doesn't know show blank.
 
+- **Gaps:** songs ReccoBeats doesn't know get BPM from [Deezer](https://developers.deezer.com/api) (free, by ISRC).
+  If neither has it, Loom estimates from the average of the same artist's other songs. Artists with no genre
+  get one guessed from your playlist names ("Slow Country" → country) or from the artists they share playlists
+  with. Estimates are shown grey with a `~`.
+
 Results are cached in `%APPDATA%\Loom\song_data_cache.json`, so later syncs only look up new songs.
 
 ## Genre playlists
