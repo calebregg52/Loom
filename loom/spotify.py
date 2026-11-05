@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 import time
 
+import requests
 import spotipy
 from spotipy.exceptions import SpotifyException
 from spotipy.oauth2 import SpotifyPKCE
@@ -50,6 +51,22 @@ class LoomSpotify(spotipy.Spotify):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.cancel_event = threading.Event()
+
+    def _build_session(self):
+        # urllib3 sleeps through any Retry-After on a 429 by default, even when 429 isn't in
+        # status_forcelist; Spotify can ask for hours. Turn that off and handle 429 below.
+        from urllib3.util.retry import Retry
+
+        self._session = requests.Session()
+        retry = Retry(
+            total=self.retries, connect=None, read=False,
+            allowed_methods=frozenset(["GET", "POST", "PUT", "DELETE"]),
+            status=self.status_retries, backoff_factor=self.backoff_factor,
+            status_forcelist=self.status_forcelist, respect_retry_after_header=False,
+        )
+        adapter = requests.adapters.HTTPAdapter(max_retries=retry)
+        self._session.mount("http://", adapter)
+        self._session.mount("https://", adapter)
 
     def _internal_call(self, method, url, payload, params):
         for attempt in range(4):

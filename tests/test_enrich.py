@@ -180,3 +180,31 @@ def test_long_rate_limit_is_reported_not_slept(monkeypatch):
     sp = LoomSpotify(auth="x")
     with pytest.raises(RateLimited, match="2 hr"):
         sp.artist("abc")
+
+
+def test_real_http_429_with_long_retry_after_returns_fast():
+    """Against a real local server: urllib3 must not sleep through Retry-After: 3600."""
+    import threading, time
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    import pytest
+    from loom.spotify import LoomSpotify, RateLimited
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(429)
+            self.send_header("Retry-After", "3600")
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"error": {"status": 429, "message": "API rate limit exceeded"}}')
+
+        def log_message(self, *a):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    sp = LoomSpotify(auth="token", retries=3, status_retries=3, status_forcelist=(500, 502, 503, 504))
+    start = time.time()
+    with pytest.raises(RateLimited, match="1 hr"):
+        sp._get(f"http://127.0.0.1:{server.server_port}/v1/artists")
+    assert time.time() - start < 5
+    server.shutdown()

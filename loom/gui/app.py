@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from datetime import datetime
@@ -59,6 +60,7 @@ class SyncWorker(QObject):
     failed = Signal(str)
 
     cancelled = Signal()
+    library_ready = Signal(dict)
 
     def __init__(self, client_id: str):
         super().__init__()
@@ -89,6 +91,7 @@ class SyncWorker(QObject):
             sp.current_user()  # triggers the browser login the first time
             data = library.fetch_library(sp, self._progress)
             library.save(data, config.library_path())
+            self.library_ready.emit(json.loads(json.dumps(data)))  # show playlists right away
             from .. import enrich
 
             self.progress.emit("Playlists done. Now adding genres and BPM…", 0, 0)
@@ -679,6 +682,7 @@ class MainWindow(QMainWindow):
         self.status.setText("Connecting to Spotify…")
         worker = SyncWorker(client_id)
         worker.cancelled.connect(self._on_cancelled)
+        worker.library_ready.connect(self._on_library_ready)
         worker.cancelled.connect(lambda: self._thread and self._thread.quit())
         self._start(worker, self._on_done, self._on_failed)
         self.sync_btn.setText("Cancel sync")
@@ -720,6 +724,11 @@ class MainWindow(QMainWindow):
         self.status.setText("Sync failed")
         QMessageBox.warning(self, "Sync failed", f"Loom couldn't read your library.\n\n{message}")
         self._restore_status()
+
+    def _on_library_ready(self, data: dict) -> None:
+        status = self.status.text()
+        self.set_library(data)
+        self.status.setText(status)
 
     def _on_cancelled(self) -> None:
         # The playlists may already be saved; show whatever made it to disk.
