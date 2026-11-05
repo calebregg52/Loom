@@ -165,11 +165,11 @@ def genre_distance(library, a, b) -> float:
 def build(library: dict[str, Any], entries: list[dict[str, Any]], shape: str | list = "wind_down",
           length: int = 25, start_id: str | None = None, genre_family: str | None = None,
           end_with_album: bool = True, seed: int | None = None, priority: str = "balanced",
-          time_budget: float = 1.2) -> dict[str, Any]:
+          time_budget: float = 1.2, thorough: bool = False) -> dict[str, Any]:
     """Plan a journey with the wave-fit planner (see wavefit.py)."""
     from . import wavefit
     return wavefit.build(library, entries, shape, length, start_id, genre_family, end_with_album,
-                         seed, priority, time_budget)
+                         seed, priority, time_budget, thorough)
 
 
 def build_greedy(
